@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.db
+health_app.db
+logs/
+*.log
+.DS_Store
+*.egg-info/
+dist/
+build/
