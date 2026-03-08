@@ -12,7 +12,7 @@ from pathlib import Path
 # LangChain imports
 from langchain.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_community.llms import Ollama
 
 # PDF parsing imports
 try:
@@ -37,17 +37,17 @@ class LabReportParser:
     Uses both regex extraction and LLM-based parsing
     """
     
-    def __init__(self, llm_model: str = "gpt-4", use_llm: bool = True):
+    def __init__(self, llm_model: str = "mistral", use_llm: bool = True):
         """
         Initialize the parser
         
         Args:
-            llm_model: OpenAI model to use for extraction
+            llm_model: Ollama model to use for extraction
             use_llm: Whether to use LLM for extraction (if False, uses regex only)
         """
         self.use_llm = use_llm
         if use_llm:
-            self.llm = ChatOpenAI(model=llm_model, temperature=0)
+            self.llm = Ollama(model=llm_model)
         else:
             self.llm = None
         
@@ -193,7 +193,7 @@ Example output:
             response = chain.invoke({"text": text[:4000]})  # Limit text length
             
             # Parse JSON from response
-            content = response.content.strip()
+            content = response.strip() if isinstance(response, str) else response.content.strip()
             
             # Remove markdown code blocks if present
             if content.startswith("```"):

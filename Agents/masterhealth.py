@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
+from langchain_community.llms import Ollama
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END, START
 from typing_extensions import TypedDict
@@ -191,7 +191,7 @@ def finalize_node(state: HealthWorkflowState) -> dict:
 def _llm_risk_prediction(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
     """Use ChatOpenAI for risk prediction; falls back to rules on failure."""
     try:
-        llm = ChatOpenAI(model="gpt-4", temperature=0)
+        llm = Ollama(model="mistral")
 
         prompt = ChatPromptTemplate.from_messages([
             ("system",
@@ -220,7 +220,7 @@ def _llm_risk_prediction(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
             "analysis": json.dumps(analysis, default=str),
         })
 
-        content = response.content.strip()
+        content = response.strip() if isinstance(response, str) else response.content.strip()
         # Strip markdown code fences if present
         if content.startswith("```"):
             content = re.sub(r"```json?\s*", "", content)
