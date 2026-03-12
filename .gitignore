@@ -10,4 +10,4 @@ logs/
 .DS_Store
 *.egg-info/
 dist/
-build/
+build/venv/
