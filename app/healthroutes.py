@@ -6,7 +6,7 @@ Includes validation, authentication, logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Any
 import logging
 import json
 
@@ -27,6 +27,7 @@ from schemas.health_schema import (
 )
 from app.auth import get_current_user
 from Agents.reportanalyzer import ReportAnalyzerAgent
+from Agents.masterhealth import MasterHealthAgent
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,25 @@ router = APIRouter(
 
 # Initialize Report Analyzer Agent
 analyzer_agent = ReportAnalyzerAgent()
+master_agent = MasterHealthAgent()
+
+
+def _build_analysis_summary(analysis: Dict[str, Any]) -> str:
+    """Create a route-level summary for either legacy or master workflow output."""
+    if analysis.get("final_assessment"):
+        final_assessment = analysis.get("final_assessment", {})
+        risk_level = analysis.get("risk_level") or final_assessment.get("risk_level", "Unknown")
+        score = final_assessment.get("score")
+        alert = analysis.get("alert")
+
+        summary = [f"Final risk level: {risk_level}"]
+        if score is not None:
+            summary.append(f"score={score}")
+        if alert is not None:
+            summary.append("alert triggered" if alert else "no alert triggered")
+        return " | ".join(summary)
+
+    return analyzer_agent.get_summary(analysis)
 
 
 @router.post("/health-data", response_model=HealthDataSubmitResponse)
@@ -49,21 +69,24 @@ async def submit_health_data(
     """
     POST /api/v1/health/health-data
     
-    Submit health data for analysis
+    Submit health data for full multi-agent health analysis
     
     Flow:
     1. Validate input (Pydantic)
     2. Authenticate user (JWT)
     3. Store in database
-    4. Trigger Report Analyzer Agent
-    5. Return success response
+    4. Trigger Master Health Agent
+    5. Store workflow result
+    6. Return final risk, alert, and report
     
     Example Request:
     {
         "hba1c": 6.8,
         "glucose": 148,
         "bmi": 29,
-        "age": 45
+        "age": 45,
+        "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"],
+        "manual_text": "Family history of diabetes"
     }
     """
     try:
@@ -74,28 +97,36 @@ async def submit_health_data(
         # Step 3: Store in database
         record = create_health_record(db, user.id, data)
         
-        # Step 4: Trigger Report Analyzer Agent
+        # Step 4: Trigger Master Health Agent
         health_data_dict = {
             "hba1c": data.hba1c,
             "glucose": data.glucose,
             "bmi": data.bmi,
-            "age": data.age
+            "age": data.age,
+            "symptoms": data.symptoms,
         }
-        
-        # Analyze the data
-        analysis_result = analyzer_agent.analyze_health_record(health_data_dict)
-        
-        # Store analysis result
-        update_health_record_analysis(db, record.id, analysis_result)
+
+        workflow_result = master_agent.process_health_data(
+            health_data=health_data_dict,
+            manual_text=data.manual_text,
+        )
+
+        # Step 5: Store workflow result
+        update_health_record_analysis(db, record.id, json.dumps(workflow_result))
         
         logger.info(f"Health record created successfully: ID={record.id}")
         
-        # Step 5: Return success response
+        # Step 6: Return final orchestration result
         return HealthDataSubmitResponse(
             status="success",
-            message="Health data stored and analyzed successfully",
+            message="Health data stored and processed through the master health workflow",
             record_id=record.id,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
+            workflow_status=workflow_result.get("workflow_status"),
+            risk_level=workflow_result.get("risk_level"),
+            alert=workflow_result.get("alert"),
+            report=workflow_result.get("report"),
+            final_assessment=workflow_result.get("final_assessment"),
         )
     
     except Exception as e:
@@ -210,8 +241,8 @@ async def get_health_data_analysis(
         # Parse and return analysis
         analysis = json.loads(record.analysis_result)
         
-        # Add summary
-        analysis["summary"] = analyzer_agent.get_summary(analysis)
+        # Add summary for legacy or master workflow result
+        analysis["summary"] = _build_analysis_summary(analysis)
         
         return {
             "record_id": record_id,
@@ -263,7 +294,7 @@ async def get_latest_record(
         if record.analyzed and record.analysis_result:
             analysis = json.loads(record.analysis_result)
             response["analysis"] = analysis
-            response["summary"] = analyzer_agent.get_summary(analysis)
+            response["summary"] = _build_analysis_summary(analysis)
         
         return response
     
@@ -286,8 +317,7 @@ async def reanalyze_record(
     """
     POST /api/v1/health/analyze/{record_id}
     
-    Re-run analysis on existing health record
-    Useful if analyzer logic is updated
+    Re-run the full master-agent analysis on an existing health record
     """
     try:
         record = get_health_record(db, record_id)
@@ -305,23 +335,27 @@ async def reanalyze_record(
                 detail="Access denied"
             )
         
-        # Re-analyze
+        # Re-run master workflow
         health_data_dict = {
             "hba1c": record.hba1c,
             "glucose": record.glucose,
             "bmi": record.bmi,
             "age": record.age
         }
-        
-        analysis_result = analyzer_agent.analyze_health_record(health_data_dict)
-        update_health_record_analysis(db, record.id, analysis_result)
+
+        workflow_result = master_agent.process_health_data(health_data_dict)
+        update_health_record_analysis(db, record.id, json.dumps(workflow_result))
         
         logger.info(f"Record {record_id} re-analyzed successfully")
         
         return {
             "status": "success",
-            "message": "Record re-analyzed successfully",
-            "record_id": record_id
+            "message": "Record re-analyzed through the master health workflow",
+            "record_id": record_id,
+            "workflow_status": workflow_result.get("workflow_status"),
+            "risk_level": workflow_result.get("risk_level"),
+            "alert": workflow_result.get("alert"),
+            "report": workflow_result.get("report"),
         }
     
     except HTTPException:

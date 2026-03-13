@@ -3,19 +3,23 @@ Master Health Agent — LangGraph Orchestrator
 Routes health analysis tasks to sub-agents via a compiled LangGraph StateGraph.
 
 Workflow:
-  START ─→ [extract_pdf] ─→ analyze ─→ [predict_risk] ─→ finalize ─→ END
+    START ─→ [extract_pdf] ─→ analyze ─→ [predict_risk] ─→ [check_symptoms]
+         ─→ [merge_results] ─→ [generate_alert] ─→ finalize ─→ END
 
 Nodes:
   extract_pdf   – Extracts health data from a PDF lab report (skipped for dict input)
   analyze       – Validates parameters & detects abnormalities (ReportAnalyzerAgent)
   predict_risk  – Predicts diabetes/metabolic risk (LLM → rule-based fallback)
+    check_symptoms– Interprets symptom patterns (Symptom Checker Agent)
+    merge_results – Combines lab + ML + symptom signals into final score/risk
+    generate_alert– Creates patient-friendly alert/report (AlertAgent)
   finalize      – Marks the workflow as completed
 """
 
 import logging
 import json
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +30,8 @@ from typing_extensions import TypedDict
 
 # Import sub-agents
 from Agents.reportanalyzer import ReportAnalyzerAgent
+from Agents.alertsystem import AlertAgent
+from Agents.symptomchecker import analyze_symptoms
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +42,20 @@ logger = logging.getLogger(__name__)
 
 class HealthWorkflowState(TypedDict):
     """Typed state that flows through the LangGraph workflow."""
-    health_data: Dict[str, float]
+    health_data: Dict[str, Any]
+    symptoms: List[str]
+    manual_text: Optional[str]
     include_risk: bool
+    include_symptom: bool
+    include_alert: bool
     input_type: str                 # "data" | "pdf"
     pdf_path: Optional[str]
     use_llm: bool
     analysis_result: Optional[Dict]
     risk_result: Optional[Dict]
+    symptom_result: Optional[Dict]
+    final_assessment: Optional[Dict]
+    alert_result: Optional[Dict]
     workflow_status: str
     error: Optional[str]
     steps: Dict[str, Any]
@@ -172,6 +185,164 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
         return {
             "risk_result": {"error": str(e)},
             "steps": {**state["steps"], "4_risk_prediction": {
+                "status": "failed", "error": str(e)
+            }},
+        }
+
+
+def generate_alert_node(state: HealthWorkflowState) -> dict:
+    """Generate final patient-facing alert/report from analysis + risk outputs."""
+    try:
+        logger.info("NODE generate_alert")
+
+        alert_agent = AlertAgent(use_llm=state.get("use_llm", False))
+        payload = {
+            "health_data": state.get("health_data", {}),
+            "analysis_result": state.get("analysis_result", {}),
+            "risk_result": state.get("risk_result", {}),
+            "risk_level": (state.get("final_assessment") or {}).get("risk_level"),
+            "diabetes_probability": (state.get("final_assessment") or {}).get("score"),
+            "abnormal_parameters": (state.get("analysis_result") or {}).get("abnormal_count", 0),
+            "symptom_score": (state.get("final_assessment") or {}).get("symptom_score"),
+        }
+        alert_result = alert_agent.process(payload)
+
+        return {
+            "alert_result": alert_result,
+            "steps": {**state["steps"], "7_alert_generation": {
+                "status": "completed",
+                "alert": alert_result.get("alert", False),
+                "risk_level": alert_result.get("risk_level", "Unknown"),
+                "alert_result": alert_result,
+            }},
+        }
+    except Exception as e:
+        logger.error(f"Alert generation failed: {e}")
+        return {
+            "alert_result": {"error": str(e)},
+            "steps": {**state["steps"], "7_alert_generation": {
+                "status": "failed", "error": str(e)
+            }},
+        }
+
+
+def check_symptoms_node(state: HealthWorkflowState) -> dict:
+    """Run symptom checker and derive normalized symptom severity."""
+    try:
+        logger.info("NODE check_symptoms")
+
+        symptoms = state.get("symptoms") or []
+        manual_text = state.get("manual_text")
+
+        if not symptoms and not manual_text:
+            symptom_result = {
+                "symptom_alignment": "low",
+                "severity_score": 0.0,
+                "reasoning": "No symptoms provided; symptom contribution kept minimal.",
+                "input_summary": {
+                    "symptoms_count": 0,
+                    "sources_used": [],
+                    "top_hypothesis": "No symptoms provided",
+                },
+                "model_used": "rule-based",
+                "symptom_mapping": {
+                    "condition_hypotheses": [],
+                    "top_hypothesis": "No symptoms provided",
+                    "total_symptoms_checked": 0,
+                    "unmatched_symptoms": [],
+                },
+            }
+        else:
+            symptom_result = analyze_symptoms(
+                symptoms=symptoms,
+                report_context=state.get("analysis_result"),
+                risk_context=state.get("risk_result"),
+                manual_text=manual_text,
+                use_llm=state.get("use_llm", False),
+            )
+            symptom_result.update(_derive_symptom_metrics(symptom_result))
+
+        return {
+            "symptom_result": symptom_result,
+            "steps": {**state["steps"], "5_symptom_checker": {
+                "status": "completed",
+                "symptom_alignment": symptom_result.get("symptom_alignment"),
+                "severity_score": symptom_result.get("severity_score"),
+                "top_hypothesis": (symptom_result.get("input_summary") or {}).get("top_hypothesis"),
+                "symptom_result": symptom_result,
+            }},
+        }
+    except Exception as e:
+        logger.error(f"Symptom checker failed: {e}")
+        return {
+            "symptom_result": {
+                "symptom_alignment": "low",
+                "severity_score": 0.0,
+                "error": str(e),
+            },
+            "steps": {**state["steps"], "5_symptom_checker": {
+                "status": "failed", "error": str(e)
+            }},
+        }
+
+
+def merge_results_node(state: HealthWorkflowState) -> dict:
+    """Combine ML, abnormal labs, and symptom severity into final score/risk."""
+    try:
+        logger.info("NODE merge_results")
+
+        analysis = state.get("analysis_result") or {}
+        risk = state.get("risk_result") or {}
+        symptom = state.get("symptom_result") or {}
+
+        abnormal_count = int(analysis.get("abnormal_count", 0) or 0)
+        abnormal_weight = min(max(abnormal_count, 0) / 3.0, 1.0)
+
+        ml_probability = _to_probability(
+            risk.get("risk_probability") or risk.get("risk_percentage")
+        )
+        if ml_probability is None:
+            ml_probability = 0.0
+
+        symptom_score = symptom.get("severity_score")
+        try:
+            symptom_score = float(symptom_score)
+        except (TypeError, ValueError):
+            symptom_score = 0.0
+        symptom_score = max(0.0, min(1.0, symptom_score))
+
+        final_score = round((ml_probability * 0.6) + (abnormal_weight * 0.3) + (symptom_score * 0.1), 4)
+        final_risk = _score_to_risk_level(final_score)
+
+        final_assessment = {
+            "risk_level": final_risk,
+            "score": final_score,
+            "ml_probability": ml_probability,
+            "abnormal_count": abnormal_count,
+            "abnormal_count_weight": round(abnormal_weight, 4),
+            "symptom_score": round(symptom_score, 4),
+            "formula": "(ml_probability * 0.6) + (abnormal_count_weight * 0.3) + (symptom_score * 0.1)",
+            "components": {
+                "ml_component": round(ml_probability * 0.6, 4),
+                "abnormal_component": round(abnormal_weight * 0.3, 4),
+                "symptom_component": round(symptom_score * 0.1, 4),
+            },
+        }
+
+        return {
+            "final_assessment": final_assessment,
+            "steps": {**state["steps"], "6_result_fusion": {
+                "status": "completed",
+                "risk_level": final_risk,
+                "score": final_score,
+                "final_assessment": final_assessment,
+            }},
+        }
+    except Exception as e:
+        logger.error(f"Result fusion failed: {e}")
+        return {
+            "final_assessment": {"error": str(e)},
+            "steps": {**state["steps"], "6_result_fusion": {
                 "status": "failed", "error": str(e)
             }},
         }
@@ -314,12 +485,100 @@ def _route_after_pdf(state: HealthWorkflowState) -> str:
 
 
 def _route_after_analysis(state: HealthWorkflowState) -> str:
-    """After analysis: predict risk or go straight to finalize."""
+    """After analysis: route to risk/symptom/merge/finalize based on config."""
     if state.get("workflow_status") == "failed":
         return "finalize"
     if state.get("include_risk", True):
         return "predict_risk"
+    if state.get("include_symptom", True):
+        return "check_symptoms"
+    return "merge_results"
+
+
+def _route_after_risk(state: HealthWorkflowState) -> str:
+    """After risk: route to symptom checker when enabled, else merge directly."""
+    if state.get("workflow_status") == "failed":
+        return "finalize"
+    if state.get("include_symptom", True):
+        return "check_symptoms"
+    return "merge_results"
+
+
+def _route_after_symptoms(state: HealthWorkflowState) -> str:
+    """After symptoms: merge all signals into final assessment."""
+    if state.get("workflow_status") == "failed":
+        return "finalize"
+    return "merge_results"
+
+
+def _route_after_merge(state: HealthWorkflowState) -> str:
+    """After merge: send result to alert agent or finish."""
+    if state.get("workflow_status") == "failed":
+        return "finalize"
+    if state.get("include_alert", True):
+        return "generate_alert"
     return "finalize"
+
+
+def _to_probability(value: Any) -> Optional[float]:
+    """Parse probability values from 0.82 / "82%" / 82 formats into [0,1]."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("%"):
+            try:
+                return float(text[:-1].strip()) / 100.0
+            except ValueError:
+                return None
+        try:
+            num = float(text)
+        except ValueError:
+            return None
+    else:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+
+    if num > 1:
+        return max(0.0, min(1.0, num / 100.0))
+    return max(0.0, min(1.0, num))
+
+
+def _score_to_risk_level(score: float) -> str:
+    if score >= 0.80:
+        return "Critical"
+    if score >= 0.65:
+        return "High"
+    if score >= 0.40:
+        return "Moderate"
+    return "Low"
+
+
+def _derive_symptom_metrics(symptom_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive normalized severity/alignment from symptom mapping output."""
+    mapping = symptom_result.get("symptom_mapping") or {}
+    hyps = mapping.get("condition_hypotheses") or []
+    total = int(mapping.get("total_symptoms_checked") or 0)
+
+    if not hyps or total <= 0:
+        severity = 0.0
+    else:
+        top_match_count = int(hyps[0].get("match_count") or 0)
+        severity = max(0.0, min(1.0, top_match_count / max(total, 1)))
+
+    if severity >= 0.7:
+        alignment = "high"
+    elif severity >= 0.35:
+        alignment = "moderate"
+    else:
+        alignment = "low"
+
+    return {
+        "symptom_alignment": alignment,
+        "severity_score": round(severity, 4),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -334,6 +593,9 @@ def build_health_workflow():
     graph.add_node("extract_pdf", extract_pdf_node)
     graph.add_node("analyze", analyze_report_node)
     graph.add_node("predict_risk", predict_risk_node)
+    graph.add_node("check_symptoms", check_symptoms_node)
+    graph.add_node("merge_results", merge_results_node)
+    graph.add_node("generate_alert", generate_alert_node)
     graph.add_node("finalize", finalize_node)
 
     # -- edges --
@@ -346,10 +608,25 @@ def build_health_workflow():
         "analyze": "analyze",
     })
     graph.add_conditional_edges("analyze", _route_after_analysis, {
-        "finalize": "finalize",
         "predict_risk": "predict_risk",
+        "check_symptoms": "check_symptoms",
+        "merge_results": "merge_results",
+        "finalize": "finalize",
     })
-    graph.add_edge("predict_risk", "finalize")
+    graph.add_conditional_edges("predict_risk", _route_after_risk, {
+        "check_symptoms": "check_symptoms",
+        "merge_results": "merge_results",
+        "finalize": "finalize",
+    })
+    graph.add_conditional_edges("check_symptoms", _route_after_symptoms, {
+        "merge_results": "merge_results",
+        "finalize": "finalize",
+    })
+    graph.add_conditional_edges("merge_results", _route_after_merge, {
+        "finalize": "finalize",
+        "generate_alert": "generate_alert",
+    })
+    graph.add_edge("generate_alert", "finalize")
     graph.add_edge("finalize", END)
 
     return graph.compile()
@@ -374,23 +651,44 @@ class MasterHealthAgent:
 
     # ── process dict input ────────────────────────────────────────────────
 
-    def process_health_data(self, health_data: Dict[str, float],
-                            include_risk: bool = True) -> Dict[str, Any]:
+    def process_health_data(self, health_data: Dict[str, Any],
+                            symptoms: Optional[List[str]] = None,
+                            manual_text: Optional[str] = None,
+                            include_risk: bool = True,
+                            include_symptom: bool = True,
+                            include_alert: bool = True) -> Dict[str, Any]:
         """
         Process health data through the LangGraph workflow.
 
         Args:
             health_data: {"hba1c": 6.8, "glucose": 148, "bmi": 29, "age": 45}
+            symptoms: ["fatigue", "frequent urination"]
             include_risk: Whether to include risk prediction step
         """
+        payload = dict(health_data)
+        extracted_symptoms = symptoms
+
+        # Supports frontend payloads where symptoms are embedded in health_data.
+        if extracted_symptoms is None and isinstance(payload.get("symptoms"), list):
+            extracted_symptoms = payload.pop("symptoms")
+        else:
+            payload.pop("symptoms", None)
+
         initial_state: HealthWorkflowState = {
-            "health_data": health_data,
+            "health_data": payload,
+            "symptoms": extracted_symptoms or [],
+            "manual_text": manual_text,
             "include_risk": include_risk,
+            "include_symptom": include_symptom,
+            "include_alert": include_alert,
             "input_type": "data",
             "pdf_path": None,
             "use_llm": False,
             "analysis_result": None,
             "risk_result": None,
+            "symptom_result": None,
+            "final_assessment": None,
+            "alert_result": None,
             "workflow_status": "in_progress",
             "error": None,
             "steps": {},
@@ -404,6 +702,14 @@ class MasterHealthAgent:
             "workflow_status": result["workflow_status"],
             "timestamp": result["timestamp"],
             "steps": result["steps"],
+            **({"symptom_result": result["symptom_result"]} if result.get("symptom_result") else {}),
+            **({"final_assessment": result["final_assessment"]} if result.get("final_assessment") else {}),
+            **({"alert_result": result["alert_result"]} if result.get("alert_result") else {}),
+            **({
+                "risk_level": result["alert_result"].get("risk_level"),
+                "alert": result["alert_result"].get("alert"),
+                "report": result["alert_result"].get("report"),
+            } if result.get("alert_result") else {}),
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
@@ -411,7 +717,11 @@ class MasterHealthAgent:
 
     def process_pdf_report(self, pdf_path: str,
                            use_llm: bool = False,
-                           include_risk: bool = True) -> Dict[str, Any]:
+                           symptoms: Optional[List[str]] = None,
+                           manual_text: Optional[str] = None,
+                           include_risk: bool = True,
+                           include_symptom: bool = True,
+                           include_alert: bool = True) -> Dict[str, Any]:
         """
         Process a PDF lab report through the LangGraph workflow.
 
@@ -422,12 +732,19 @@ class MasterHealthAgent:
         """
         initial_state: HealthWorkflowState = {
             "health_data": {},
+            "symptoms": symptoms or [],
+            "manual_text": manual_text,
             "include_risk": include_risk,
+            "include_symptom": include_symptom,
+            "include_alert": include_alert,
             "input_type": "pdf",
             "pdf_path": pdf_path,
             "use_llm": use_llm,
             "analysis_result": None,
             "risk_result": None,
+            "symptom_result": None,
+            "final_assessment": None,
+            "alert_result": None,
             "workflow_status": "in_progress",
             "error": None,
             "steps": {},
@@ -443,6 +760,14 @@ class MasterHealthAgent:
             "input_type": "pdf",
             "input_file": result.get("input_file", Path(pdf_path).name),
             "steps": result["steps"],
+            **({"symptom_result": result["symptom_result"]} if result.get("symptom_result") else {}),
+            **({"final_assessment": result["final_assessment"]} if result.get("final_assessment") else {}),
+            **({"alert_result": result["alert_result"]} if result.get("alert_result") else {}),
+            **({
+                "risk_level": result["alert_result"].get("risk_level"),
+                "alert": result["alert_result"].get("alert"),
+                "report": result["alert_result"].get("report"),
+            } if result.get("alert_result") else {}),
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
@@ -543,6 +868,53 @@ class MasterHealthAgent:
                 lines.append(f"   Error: {step.get('error', 'Unknown error')}")
             lines.append("")
 
+        # Step 5 — Symptom Checker
+        if "5_symptom_checker" in steps:
+            step = steps["5_symptom_checker"]
+            icon = "✅" if step["status"] == "completed" else "❌"
+            lines.append(f"{icon} Step 5: Symptom Checker")
+
+            if step["status"] == "completed":
+                lines.append(f"   Symptom Alignment: {step.get('symptom_alignment', 'N/A')}")
+                lines.append(f"   Severity Score: {step.get('severity_score', 'N/A')}")
+                lines.append(f"   Top Hypothesis: {step.get('top_hypothesis', 'N/A')}")
+            else:
+                lines.append(f"   Error: {step.get('error', 'Unknown error')}")
+            lines.append("")
+
+        # Step 6 — Result Fusion
+        if "6_result_fusion" in steps:
+            step = steps["6_result_fusion"]
+            icon = "✅" if step["status"] == "completed" else "❌"
+            lines.append(f"{icon} Step 6: Merge Results")
+
+            if step["status"] == "completed":
+                merged = step.get("final_assessment", {})
+                lines.append(f"   Final Risk: {merged.get('risk_level', 'N/A')}")
+                lines.append(f"   Final Score: {merged.get('score', 'N/A')}")
+                lines.append(f"   Formula: {merged.get('formula', 'N/A')}")
+            else:
+                lines.append(f"   Error: {step.get('error', 'Unknown error')}")
+            lines.append("")
+
+        # Step 7 — Alert Generation
+        if "7_alert_generation" in steps:
+            step = steps["7_alert_generation"]
+            icon = "✅" if step["status"] == "completed" else "❌"
+            lines.append(f"{icon} Step 7: Alert Generation")
+
+            if step["status"] == "completed":
+                alert_result = step.get("alert_result", {})
+                alert = alert_result.get("alert", False)
+                alert_icon = "⚠️" if alert else "✅"
+                lines.append(f"   {alert_icon} Alert: {'Triggered' if alert else 'Not Triggered'}")
+                lines.append(f"   Risk Level: {alert_result.get('risk_level', 'Unknown')}")
+                lines.append(f"   Report: {alert_result.get('report', 'N/A')}")
+                lines.append(f"   Notification: {alert_result.get('notification', 'N/A')}")
+            else:
+                lines.append(f"   Error: {step.get('error', 'Unknown error')}")
+            lines.append("")
+
         lines.append("=" * 70)
         return "\n".join(lines)
 
@@ -557,7 +929,7 @@ class MasterHealthAgent:
 
 # ── standalone helper ─────────────────────────────────────────────────────────
 
-def analyze_health(data: Dict[str, float]) -> Dict[str, Any]:
+def analyze_health(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Standalone function to run complete health analysis.
 

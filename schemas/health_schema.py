@@ -3,7 +3,7 @@ Pydantic schemas for health data validation
 Ensures input data meets medical and technical requirements
 """
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
@@ -36,6 +36,15 @@ class HealthInput(BaseModel):
         le=120,
         description="Patient age in years (1-120)"
     )
+    symptoms: List[str] = Field(
+        default_factory=list,
+        description="Optional list of patient symptoms for symptom analysis"
+    )
+    manual_text: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+        description="Optional free-text clinical context or patient notes"
+    )
 
     @field_validator('hba1c', 'glucose', 'bmi')
     @classmethod
@@ -51,7 +60,9 @@ class HealthInput(BaseModel):
                 "hba1c": 6.8,
                 "glucose": 148.0,
                 "bmi": 29.0,
-                "age": 45
+                "age": 45,
+                "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"],
+                "manual_text": "Family history of Type 2 diabetes"
             }
         }
 
@@ -76,12 +87,17 @@ class HealthRecordResponse(BaseModel):
 
 class HealthDataSubmitResponse(BaseModel):
     """
-    Response after submitting health data
+    Response after submitting health data through the full master workflow.
     """
     status: str
     message: str
     record_id: int
     timestamp: datetime
+    workflow_status: Optional[str] = None
+    risk_level: Optional[str] = None
+    alert: Optional[bool] = None
+    report: Optional[str] = None
+    final_assessment: Optional[Dict[str, Any]] = None
 
 
 class UserCreate(BaseModel):

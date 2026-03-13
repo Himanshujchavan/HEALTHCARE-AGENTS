@@ -1,336 +1,503 @@
 # AI Health System
 
-Production-ready health analysis system with multi-agent architecture.
+AI Health System is a multi-agent healthcare analysis platform built with FastAPI, LangChain, LangGraph, SQLAlchemy, and a React frontend.
 
-## 🚀 Features Implemented
+The project combines structured health data, symptom interpretation, risk reasoning, and alert/report generation into a coordinated agent workflow focused on diabetes and metabolic risk screening.
 
-### ✅ Step 1: Health Data Input API
-- **POST** `/api/v1/health/health-data` - Submit health data
-- Input validation with Pydantic
-- JWT authentication
-- Database storage
-- Error handling & logging
-- Structured responses
+## Why This Project Is Agentic AI
 
-### ✅ Step 2: Report Analyzer Agent
-- Validates lab values
-- Compares with medical reference ranges
-- Detects abnormalities
-- Generates structured JSON output
-- Prepares features for ML models
+This project is agentic AI because it is not a single prompt or single model call. It uses multiple specialized agents with distinct responsibilities, a controller that routes work between them, intermediate state passing, conditional execution, and fallback behavior when an LLM is unavailable.
 
-## 📁 Project Structure
+Agentic behavior in this codebase includes:
 
-```
-AI-HEALTH/
-├── Agents/
-│   ├── reportanalyzer.py      # Report Analyzer Agent (Step 2)
-│   ├── riskpredictor.py        # Risk Prediction Agent (Future)
-│   ├── symptomchecker.py       # Symptom Checker (Future)
-│   ├── alertsystem.py          # Alert System (Future)
-│   └── masterhealth.py         # Master Coordinator (Future)
-├── app/
-│   ├── auth.py                  # Authentication dependencies
-│   ├── authroutes.py           # Auth endpoints (login/register)
-│   └── healthroutes.py         # Health data endpoints
-├── database/
-│   ├── config.py               # Database configuration
-│   ├── models.py               # SQLAlchemy models
-│   └── crud.py                 # CRUD operations
-├── schemas/
-│   └── health_schema.py        # Pydantic validation schemas
-├── utils/
-│   ├── constants.py            # Medical reference ranges
-│   └── helpers.py              # Utility functions
-├── logs/                       # Application logs
-├── main.py                     # FastAPI application
-└── requirements.txt            # Dependencies
-```
+- Specialized agents with clear responsibilities instead of one monolithic function.
+- A master orchestrator built with LangGraph in `Agents/masterhealth.py`.
+- Step-by-step execution where one agent's output becomes another agent's input.
+- Conditional routing based on workflow state and enabled stages.
+- Hybrid reasoning that combines LLM calls with deterministic medical rules.
+- Final decision synthesis from multiple signals instead of a single raw prediction.
 
-## 🛠️ Setup Instructions
+In short: the system behaves like a coordinated team of agents rather than a single chatbot.
 
-### 1. Install Dependencies
+## Core Agents
 
-```bash
-pip install -r requirements.txt
+### 1. Master Health Agent
+
+File: `Agents/masterhealth.py`
+
+This is the central orchestrator of the system.
+
+Responsibilities:
+
+- receives structured health input or PDF-derived lab input
+- triggers the other agents in sequence
+- stores workflow state between steps
+- merges lab, risk, and symptom signals into one final assessment
+- forwards the final result to the Alert Agent
+- returns the final health report payload
+
+Current LangGraph flow:
+
+```text
+START
+  -> extract_pdf (optional)
+  -> analyze
+  -> predict_risk
+  -> check_symptoms
+  -> merge_results
+  -> generate_alert
+  -> finalize
+END
 ```
 
-Additional required packages:
-```bash
-pip install uvicorn python-jose[cryptography] passlib[bcrypt] python-multipart python-dotenv
-```
+The master agent is what makes the system agentic. It does not perform all reasoning itself. It coordinates the rest of the system.
 
-### 2. Configure Environment
+### 2. Report Analyzer Agent
 
-Copy `.env.example` to `.env` and update:
-```bash
-cp .env.example .env
-```
+File: `Agents/reportanalyzer.py`
 
-Edit `.env` with your database URL and secret key.
+Purpose:
 
-### 3. Run the Application
+- validates lab values against reference ranges
+- detects abnormal parameters
+- returns structured JSON for downstream agents
 
-```bash
-python main.py
-```
+Example responsibilities in code:
 
-Or with uvicorn:
-```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
+- HbA1c range checks
+- glucose range checks
+- BMI range checks
+- abnormal count calculation
+- abnormal parameter list generation
 
-### 4. Access API Documentation
+This agent is the structured lab-analysis layer.
 
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+### 3. Risk Prediction Agent
 
-## 📡 API Endpoints
+File: `Agents/riskpredictor.py`
 
-### Authentication
+Purpose:
 
-#### Register User
-```http
-POST /api/v1/auth/register
-Content-Type: application/json
+- converts health analysis into a risk assessment
+- exposes both a master-agent compatibility interface and a conversational interface
 
-{
-  "username": "john_doe",
-  "email": "john@example.com",
-  "password": "SecurePass123"
-}
-```
+Current implementation details:
 
-#### Login
-```http
-POST /api/v1/auth/login
-Content-Type: application/x-www-form-urlencoded
+- wraps a standalone conversational health agent under `Agents/health_agent/`
+- can infer a risk level from agent output
+- maps risk level to normalized probability for orchestration
+- preserves conversational sessions in memory for repeated interactions
 
-username=john_doe&password=SecurePass123
-```
+The nested standalone health agent under `Agents/health_agent/` uses its own tools and memory flow and is designed more like an assistant-oriented risk triage service.
 
-Response:
+### 4. Symptom Checker Agent
+
+File: `Agents/symptomchecker.py`
+
+Purpose:
+
+- interprets user symptoms in the context of diabetes-related conditions
+- maps symptom patterns to possible conditions
+- generates a reasoning summary
+- provides a normalized symptom contribution used by the master agent
+
+It supports:
+
+- symptom taxonomy matching
+- condition hypothesis ranking
+- optional LLM reasoning with rule-based fallback
+- symptom severity normalization for result fusion
+
+This is the symptom intelligence layer of the project.
+
+### 5. Alert Agent
+
+File: `Agents/alertsystem.py`
+
+Purpose:
+
+- receives the combined output from the master workflow
+- checks alert thresholds
+- generates a plain-language patient-friendly report
+- produces the final notification/warning message
+
+Default alert rules in code:
+
+- `diabetes_probability > 0.70`
+- `hba1c > 7.0`
+- `abnormal_parameters >= 3`
+
+This is the final communication layer between the AI pipeline and the end user.
+
+## Full Multi-Agent Workflow
+
+### Structured Input Example
+
 ```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "token_type": "bearer"
-}
-```
-
-### Health Data
-
-#### Submit Health Data
-```http
-POST /api/v1/health/health-data
-Authorization: Bearer <token>
-Content-Type: application/json
-
 {
   "hba1c": 6.8,
   "glucose": 148,
   "bmi": 29,
-  "age": 45
+  "age": 45,
+  "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"]
 }
 ```
 
-Response:
+### Actual Processing Flow
+
+```text
+User Input
+   -> Master Health Agent
+   -> Report Analyzer Agent
+   -> Risk Prediction Agent
+   -> Symptom Checker Agent
+   -> Master Agent result fusion
+   -> Alert Agent
+   -> Final health report
+```
+
+### Result Fusion Formula
+
+The master agent combines multiple signals into a final score:
+
+```text
+final_score =
+  (ml_probability * 0.6)
+  + (abnormal_count_weight * 0.3)
+  + (symptom_score * 0.1)
+```
+
+Where:
+
+- `ml_probability` is derived from the Risk Prediction Agent
+- `abnormal_count_weight` is the normalized abnormal lab count
+- `symptom_score` is the normalized symptom severity/alignment score
+
+The master agent then maps the score to a final risk level and passes that to the Alert Agent.
+
+## Example Final Output
+
 ```json
 {
-  "status": "success",
-  "message": "Health data stored and analyzed successfully",
-  "record_id": 128,
-  "timestamp": "2026-03-07T10:30:00"
-}
-```
-
-#### Get Health Record
-```http
-GET /api/v1/health/health-data/{record_id}
-Authorization: Bearer <token>
-```
-
-#### Get Analysis
-```http
-GET /api/v1/health/health-data/{record_id}/analysis
-Authorization: Bearer <token>
-```
-
-Response:
-```json
-{
-  "record_id": 128,
-  "created_at": "2026-03-07T10:30:00",
-  "analysis": {
-    "parameters": {
-      "hba1c": {
-        "value": 6.8,
-        "status": "High",
-        "category": "diabetes"
-      },
-      "glucose": {
-        "value": 148,
-        "status": "High",
-        "category": "prediabetes"
-      },
-      "bmi": {
-        "value": 29,
-        "status": "High",
-        "category": "overweight"
-      },
-      "age": {
-        "value": 45,
-        "status": "Normal"
-      }
-    },
+  "workflow_status": "completed",
+  "risk_level": "Critical",
+  "alert": true,
+  "report": "Your glucose value is elevated and needs attention. Your BMI is in the overweight range. Estimated diabetes risk probability is about 91%. Risk Level: Critical. Please consult a healthcare professional soon for a complete evaluation.",
+  "final_assessment": {
+    "risk_level": "Critical",
+    "score": 0.91,
+    "ml_probability": 0.95,
     "abnormal_count": 3,
-    "abnormal_parameters": ["hba1c", "glucose", "bmi"],
-    "ml_features": [6.8, 148, 29, 45]
-  },
-  "summary": "⚠️ 3 abnormal parameter(s) detected: hba1c, glucose, bmi"
+    "symptom_score": 0.5
+  }
 }
 ```
 
-#### Get Latest Record
-```http
-GET /api/v1/health/latest
-Authorization: Bearer <token>
+## Project Architecture
+
+```text
+AI-HEALTH/
+├── Agents/
+│   ├── alertsystem.py
+│   ├── masterhealth.py
+│   ├── reportanalyzer.py
+│   ├── riskpredictor.py
+│   ├── symptomchecker.py
+│   └── health_agent/
+│       ├── agent/
+│       ├── chains/
+│       ├── knowledge_base/
+│       ├── data/
+│       ├── tests/
+│       ├── main.py
+│       └── requirements.txt
+├── app/
+│   ├── auth.py
+│   ├── authroutes.py
+│   └── healthroutes.py
+├── database/
+│   ├── config.py
+│   ├── crud.py
+│   └── models.py
+├── frontend/
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.js
+├── schemas/
+├── tools/
+├── utils/
+├── main.py
+└── requirements.txt
 ```
 
-## 🏗️ Architecture
+## Backend Components
 
-### Step 1: Health Data Input API
+### FastAPI App
 
+File: `main.py`
+
+Responsibilities:
+
+- application startup and shutdown
+- logging configuration
+- database initialization
+- global exception handling
+- auth and health route registration
+
+### Authentication Layer
+
+Files:
+
+- `app/auth.py`
+- `app/authroutes.py`
+
+Features:
+
+- user registration
+- login with JWT token generation
+- password hashing with bcrypt
+- protected routes via dependency injection
+
+### Database Layer
+
+Files:
+
+- `database/config.py`
+- `database/models.py`
+- `database/crud.py`
+
+Current storage model:
+
+- `User`
+- `HealthRecord`
+
+The database currently stores structured health records and the analysis JSON produced by the health workflow. The `analysis_result` field may contain either legacy analyzer output or the full master-agent orchestration result.
+
+### Validation Layer
+
+File: `schemas/health_schema.py`
+
+Current request validation for the main health API includes:
+
+- HbA1c
+- glucose
+- BMI
+- age
+- optional symptoms list
+- optional manual clinical note text
+
+Important note:
+
+The FastAPI `POST /api/v1/health/health-data` endpoint now validates input, stores the health record, triggers the full Master Health Agent workflow, stores the orchestration result, and returns the final risk, alert flag, and patient-facing report.
+
+## Current API Surface
+
+### Auth Endpoints
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/token`
+
+### Health Endpoints
+
+- `POST /api/v1/health/health-data`
+- `GET /api/v1/health/health-data/{record_id}`
+- `GET /api/v1/health/health-data/{record_id}/analysis`
+- `GET /api/v1/health/health-data`
+- `GET /api/v1/health/latest`
+- `POST /api/v1/health/analyze/{record_id}`
+
+### Root / Utility Endpoints
+
+- `GET /`
+- `GET /health`
+
+## Frontend
+
+The project also includes a React + Vite frontend under `frontend/`.
+
+Current frontend stack:
+
+- React 19
+- Vite
+- React Router
+- React Hook Form
+- Axios
+- Zustand
+- Recharts
+
+This frontend currently provides the client-side foundation for user interaction and authentication-related flows.
+
+## Standalone Conversational Health Agent
+
+Folder: `Agents/health_agent/`
+
+This is a second, self-contained agent subsystem used by `riskpredictor.py`.
+
+It includes:
+
+- tool-calling agent construction
+- conversational memory
+- risk and triage tools
+- knowledge-base retrieval components
+- its own FastAPI app in `Agents/health_agent/main.py`
+- its own `requirements.txt`
+
+Important note:
+
+This module depends on additional packages and environment variables beyond the root project setup. In particular, the code references `langchain_groq` and an external model configuration for the conversational path.
+
+## Technology Stack
+
+### AI / Agent Stack
+
+- LangChain
+- LangGraph
+- Ollama-based local LLM calls for some stages
+- rule-based fallback logic when LLM calls fail
+
+### Backend Stack
+
+- FastAPI
+- SQLAlchemy
+- Pydantic
+- JWT authentication
+- SQLite by default, PostgreSQL supported by environment configuration
+
+### Frontend Stack
+
+- React
+- Vite
+- Axios
+
+## Setup
+
+### 1. Create and activate a virtual environment
+
+Windows PowerShell:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 ```
-Frontend
-   ↓
-POST /api/health-data
-   ↓
-Pydantic Validation (HealthInput schema)
-   ↓
-JWT Authentication
-   ↓
-Store in Database (HealthRecord)
-   ↓
-Trigger Report Analyzer Agent
-   ↓
-Return Success Response
+
+### 2. Install backend dependencies
+
+```powershell
+pip install -r requirements.txt
 ```
 
-### Step 2: Report Analyzer Agent
+### 3. Configure environment variables
 
-```
-Health Data Record
-       ↓
-Report Analyzer Agent
-       ↓
-Parameter Validation
-       ↓
-Compare with Reference Ranges
-       ↓
-Abnormality Detection
-       ↓
-Structured JSON Output
-       ↓
-Store Analysis Result
-       ↓
-Ready for Risk Prediction Agent
+Create a `.env` file in the project root with values such as:
+
+```env
+DATABASE_URL=sqlite:///./health_app.db
+SECRET_KEY=change-this-in-production
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
 ```
 
-## 🔒 Security Features
+### 4. Start the backend
 
-- ✅ JWT-based authentication
-- ✅ Password hashing (bcrypt)
-- ✅ Input validation (Pydantic)
-- ✅ SQL injection protection (SQLAlchemy)
-- ✅ Authorization checks (user owns data)
-- ✅ CORS configuration
-- ✅ Secure token expiration
-
-## 📊 Medical Reference Ranges
-
-| Parameter | Normal Range | Unit |
-|-----------|-------------|------|
-| HbA1c | 4.0 - 5.6 | % |
-| Glucose | 70 - 99 | mg/dL |
-| BMI | 18.5 - 24.9 | kg/m² |
-| Age | 0 - 120 | years |
-
-## 🧪 Testing the System
-
-### Test the Report Analyzer Agent
-```bash
-cd Agents
-python reportanalyzer.py
-```
-
-### Test API with curl
-
-1. Register:
-```bash
-curl -X POST http://localhost:8000/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"test_user","email":"test@example.com","password":"password123"}'
-```
-
-2. Login:
-```bash
-curl -X POST http://localhost:8000/api/v1/auth/login \
-  -d "username=test_user&password=password123"
-```
-
-3. Submit Health Data:
-```bash
-curl -X POST http://localhost:8000/api/v1/health/health-data \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"hba1c":6.8,"glucose":148,"bmi":29,"age":45}'
-```
-
-## 📝 Logging
-
-Application logs are stored in `logs/app.log`:
-- User authentication events
-- Health data submissions
-- Analysis results
-- Errors and exceptions
-
-## 🔄 Next Steps
-
-### Future Agents (Step 3+):
-1. **Risk Prediction Agent** - ML-based risk scoring
-2. **Symptom Checker Agent** - AI symptom analysis
-3. **Alert System Agent** - Critical value notifications
-4. **Master Health Coordinator** - Orchestrates all agents
-
-### Production Enhancements:
-- Add database migrations (Alembic)
-- Implement rate limiting
-- Add caching (Redis)
-- Set up monitoring (Prometheus)
-- Add comprehensive tests
-- Docker containerization
-- CI/CD pipeline
-
-## 🐛 Troubleshooting
-
-### Database Issues
-```bash
-# Delete existing database and reinitialize
-rm health_app.db
+```powershell
 python main.py
 ```
 
-### Import Errors
-```bash
-# Ensure all dependencies are installed
-pip install -r requirements.txt
-pip install uvicorn python-jose[cryptography] passlib[bcrypt] python-multipart python-dotenv
+Or:
+
+```powershell
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## 📄 License
+### 5. Open API docs
 
-MIT License
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
 
-## 👤 Author
+### 6. Start the frontend
 
-AI Health System Development Team
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+## Optional Local LLM Setup
+
+Some agents attempt to use local Ollama models. If the model is unavailable or the machine does not have enough RAM, the code falls back to deterministic logic for several stages.
+
+Examples used in the codebase:
+
+- `mistral`
+- `deepseek-r1:8b`
+
+Example Ollama commands:
+
+```powershell
+ollama pull mistral
+ollama pull deepseek-r1:8b
+```
+
+## Example Usage of the Master Agent
+
+```python
+from Agents.masterhealth import MasterHealthAgent
+
+agent = MasterHealthAgent()
+
+payload = {
+    "hba1c": 6.8,
+    "glucose": 148,
+    "bmi": 29,
+    "age": 45,
+    "symptoms": [
+        "Fatigue / Low energy",
+        "Polyuria (frequent urination)"
+    ]
+}
+
+result = agent.process_health_data(payload)
+print(result["risk_level"])
+print(result["alert"])
+print(result["report"])
+```
+
+## Medical Scope in the Current Code
+
+The current implementation is focused mainly on:
+
+- diabetes screening signals
+- glucose/HbA1c-based metabolic risk
+- diabetes-oriented symptom reasoning
+- patient-friendly alert/report generation
+
+It is not a general diagnosis engine.
+
+## Safety and Practical Notes
+
+- The system provides risk support, not medical diagnosis.
+- Some agent paths depend on local or external model availability.
+- Rule-based fallbacks are intentionally used to keep the pipeline operational when LLM calls fail.
+- The standalone `Agents/health_agent/` module has separate dependency requirements from the root backend.
+
+## Current Status Summary
+
+Implemented and present in code:
+
+- authentication and protected health endpoints
+- database persistence for users and health records
+- Report Analyzer Agent
+- Risk Prediction Agent wrapper
+- Symptom Checker Agent
+- Alert Agent
+- Master Health Agent with LangGraph orchestration
+- React frontend scaffold
+
+Already validated during development:
+
+- workspace diagnostics were clean
+- master workflow executed end-to-end
+- symptom stage, merge stage, and alert stage executed successfully
+- a dedicated API route that exposes the complete master-agent orchestration response directly to the frontend
+

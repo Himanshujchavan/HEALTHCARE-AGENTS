@@ -32,7 +32,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_community.llms import Ollama
 from langchain.tools import tool
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 logger = logging.getLogger(__name__)
