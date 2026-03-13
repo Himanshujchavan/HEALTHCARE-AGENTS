@@ -1,32 +1,27 @@
-"""
-AI HEALTH SYSTEM - Main Application
-Production-ready FastAPI application with:
-- Health data input API (Step 1)
-- Report analyzer agent (Step 2)
-- Authentication & security
-- Database integration
-- Logging
-- Error handling
-"""
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
 import logging
 import os
 from datetime import datetime
 
 # Database initialization
 from database.config import init_db
+from utils.constants import LOG_FORMAT, LOG_LEVEL
 
 # Routes
 from app.authroutes import router as auth_router
 from app.healthroutes import router as health_router
 
+# Load environment variables
+load_dotenv()
+
 # Setup logging
 os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    format=LOG_FORMAT,
     handlers=[
         logging.FileHandler('logs/app.log'),
         logging.StreamHandler()

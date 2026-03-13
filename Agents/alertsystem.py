@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -83,7 +83,7 @@ class AlertAgent:
 			"notification": notification,
 			"triggers": evaluation["triggers"],
 			"metrics": evaluation["metrics"],
-			"timestamp": datetime.utcnow().isoformat(),
+			"timestamp": datetime.now(timezone.utc).isoformat(),
 		}
 
 	def _evaluate_risk(self, result: Dict[str, Any]) -> Dict[str, Any]:
