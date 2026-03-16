@@ -153,21 +153,34 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
         analysis = state.get("analysis_result", {})
         health_data = state.get("health_data", {})
 
-        # 1. Try the dedicated RiskPredictorAgent (may be empty / not implemented)
+        # 1) Try the dedicated RiskPredictorAgent (conversational agent)
+        #    This is optional and may require external deps/keys.
+        risk: Dict[str, Any]
+        used_fallback = False
         try:
             from Agents.riskpredictor import RiskPredictorAgent
+
             predictor = RiskPredictorAgent()
             risk_json = predictor.predict_from_analysis(analysis)
             risk = json.loads(risk_json)
-        except (ImportError, AttributeError, TypeError):
-            # 2. Fall back to LangChain LLM risk prediction
-            risk = _llm_risk_prediction(analysis, health_data)
 
-        if "error" in risk:
+            # Treat explicit failure signals as non-fatal and fall back.
+            if risk.get("success") is False or risk.get("error"):
+                raise RuntimeError(risk.get("error") or "RiskPredictorAgent failed")
+
+        except Exception as predictor_error:
+            # 2) Fall back to local LLM/rules-based risk prediction.
+            #    _llm_risk_prediction itself falls back to rules if LLM isn't available.
+            logger.warning(f"RiskPredictorAgent unavailable ({predictor_error}); using fallback")
+            risk = _llm_risk_prediction(analysis, health_data)
+            used_fallback = True
+
+        # Some fallback implementations return {"error": ...} on failure.
+        if risk.get("error"):
             return {
                 "risk_result": risk,
                 "steps": {**state["steps"], "4_risk_prediction": {
-                    "status": "failed", "error": risk["error"]
+                    "status": "failed", "error": risk.get("error")
                 }},
             }
 
@@ -177,6 +190,7 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
                 "status": "completed",
                 "risk_level": risk.get("risk_level"),
                 "risk_probability": risk.get("risk_probability"),
+                "prediction_method": risk.get("prediction_method") or ("fallback" if used_fallback else None),
                 "risk_result": risk,
             }},
         }
