@@ -23,8 +23,6 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from pathlib import Path
 
-from langchain_community.llms import Ollama
-from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END, START
 from typing_extensions import TypedDict
 
@@ -370,51 +368,19 @@ def finalize_node(state: HealthWorkflowState) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LLM + RULE-BASED RISK PREDICTION (fallback when sub-agent is missing)
+#  RISK PREDICTION FALLBACK (RULE-BASED ONLY)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _llm_risk_prediction(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
-    """Use ChatOpenAI for risk prediction; falls back to rules on failure."""
-    try:
-        llm = Ollama(model="mistral")
+    """Fallback risk prediction helper.
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "You are a medical risk assessment AI.\n"
-             "Given a patient's health analysis, predict their diabetes/metabolic risk.\n\n"
-             "Return ONLY valid JSON with this structure:\n"
-             '{{\n'
-             '  "risk_level": "Low" | "Moderate" | "High" | "Critical",\n'
-             '  "risk_probability": "XX%",\n'
-             '  "risk_percentage": "XX%",\n'
-             '  "prediction_method": "llm_analysis",\n'
-             '  "risk_factors": [\n'
-             '    {{"parameter": "name", "value": 0, "impact": "Low|Medium|High"}}\n'
-             '  ],\n'
-             '  "recommendations": ["recommendation1", "recommendation2"]\n'
-             '}}'),
-            ("user",
-             "Patient Health Data: {health_data}\n\n"
-             "Analysis Result: {analysis}\n\n"
-             "Provide risk assessment as JSON only."),
-        ])
-
-        chain = prompt | llm
-        response = chain.invoke({
-            "health_data": json.dumps(health_data),
-            "analysis": json.dumps(analysis, default=str),
-        })
-
-        content = response.strip() if isinstance(response, str) else response.content.strip()
-        # Strip markdown code fences if present
-        if content.startswith("```"):
-            content = re.sub(r"```json?\s*", "", content)
-            content = re.sub(r"```\s*$", "", content)
-
-        return json.loads(content)
-    except Exception as e:
-        logger.warning(f"LLM risk prediction unavailable ({e}), using rule-based fallback")
-        return _rule_based_risk(analysis, health_data)
+    Originally this used an LLM (via Ollama) and fell back to
+    deterministic rules on failure. To remove the external dependency
+    and deprecation warnings, this implementation now delegates
+    directly to the rule-based engine.
+    """
+    logger.info("LLM-based risk prediction disabled; using rule-based implementation.")
+    return _rule_based_risk(analysis, health_data)
 
 
 def _rule_based_risk(analysis: Dict, health_data: Dict) -> Dict[str, Any]:

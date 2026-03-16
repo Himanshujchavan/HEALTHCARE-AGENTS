@@ -1,11 +1,12 @@
+"""HEALTH DATA API ROUTES
+
+Handles health data submission, PDF uploads, retrieval,
+and orchestration through the master health workflow.
 """
-HEALTH DATA API ROUTES - Step 1
-Handles health data submission and retrieval
-Includes validation, authentication, logging
-"""
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Any
 import logging
 import json
@@ -58,6 +59,84 @@ def _build_analysis_summary(analysis: Dict[str, Any]) -> str:
         return " | ".join(summary)
 
     return analyzer_agent.get_summary(analysis)
+
+
+@router.post("/upload-report")
+async def upload_health_report(
+    file: UploadFile = File(...),
+    use_llm: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Upload a PDF lab report and run it through the master health workflow.
+
+    Endpoint: POST /api/v1/health/upload-report
+
+    Workflow:
+    1. User uploads PDF
+    2. Backend saves to local uploads/ folder
+    3. MasterHealthAgent.process_pdf_report runs:
+       - tools.labparse.extract_health_data_from_pdf → raw parameters
+       - ReportAnalyzerAgent.analyze_health_record → validated parameters
+       - downstream risk, fusion, and alert steps
+    4. API returns both extracted parameters and full workflow result.
+    """
+    try:
+        if file.content_type not in {"application/pdf", "application/octet-stream"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported",
+            )
+
+        uploads_dir = Path("uploads")
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_name = Path(file.filename).name or "report.pdf"
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        stored_path = uploads_dir / f"{user.id}_{timestamp}_{safe_name}"
+
+        # Stream file to disk in chunks
+        with stored_path.open("wb") as out_file:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+
+        logger.info("PDF report uploaded by user %s: %s", user.id, stored_path)
+
+        workflow_result = master_agent.process_pdf_report(
+            pdf_path=str(stored_path),
+            use_llm=use_llm,
+        )
+
+        steps = workflow_result.get("steps", {})
+        pdf_step = steps.get("0_pdf_extraction", {})
+        structured_step = steps.get("3_structured_output", {})
+        analysis_result = structured_step.get("analysis_result") or {}
+
+        extracted_parameters = (
+            pdf_step.get("extracted_parameters")
+            or list(analysis_result.get("parameters", {}).keys())
+        )
+
+        return {
+            "status": "success",
+            "message": "PDF processed through the master health workflow",
+            "filename": file.filename,
+            "stored_path": str(stored_path),
+            "extracted_parameters": extracted_parameters,
+            "analysis": analysis_result,
+            **workflow_result,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error processing uploaded PDF: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process PDF report",
+        )
 
 
 @router.post("/health-data", response_model=HealthDataSubmitResponse)
