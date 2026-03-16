@@ -215,10 +215,10 @@ if __name__ == "__main__":
 
     # Sample input
     data = {
-        "hba1c": 6.8,
-        "glucose": 148.0,
-        "bmi": 29.0,
-        "age": 45,
+        "hba1c": 5.8,
+        "glucose": 168.0,
+        "bmi": 23.0,
+        "age": 55.0,
     }
 
     # --- Direct validation (no LLM needed) ---
