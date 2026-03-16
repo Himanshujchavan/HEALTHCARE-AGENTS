@@ -1,27 +1,10 @@
 """
-Database models for the AI Health system
+Database models for the AI Health system (auth-free)
+Only HealthRecord is used; User model removed for testing
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, Float, DateTime, String, Boolean
 from datetime import datetime
 from database.config import Base
-
-
-class User(Base):
-    """
-    User model for authentication
-    """
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True, nullable=False)
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationship to health records
-    health_records = relationship("HealthRecord", back_populates="user")
 
 
 class HealthRecord(Base):
@@ -31,7 +14,7 @@ class HealthRecord(Base):
     __tablename__ = "health_records"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, nullable=False, default=1)  # dummy user ID for testing
     
     # Lab parameters
     hba1c = Column(Float, nullable=False)
@@ -43,9 +26,6 @@ class HealthRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     analyzed = Column(Boolean, default=False)
     analysis_result = Column(String, nullable=True)  # Store JSON analysis result
-    
-    # Relationship to user
-    user = relationship("User", back_populates="health_records")
 
     def __repr__(self):
         return f"<HealthRecord(id={self.id}, user_id={self.user_id}, created_at={self.created_at})>"

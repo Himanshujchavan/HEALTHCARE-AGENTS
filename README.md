@@ -303,7 +303,7 @@ The FastAPI `POST /api/v1/health/health-data` endpoint now validates input, stor
 - `POST /api/v1/health/health-data`
 - `GET /api/v1/health/health-data/{record_id}`
 - `GET /api/v1/health/health-data/{record_id}/analysis`
-- `GET /api/v1/health/health-data`
+- `GET /api/v1/health/health-data`  
 - `GET /api/v1/health/latest`
 - `POST /api/v1/health/analyze/{record_id}`
 

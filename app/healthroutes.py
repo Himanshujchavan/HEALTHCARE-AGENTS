@@ -1,9 +1,8 @@
 """
-HEALTH DATA API ROUTES - Step 1
-Handles health data submission and retrieval
-Includes validation, authentication, logging
+HEALTH DATA API ROUTES - Auth-Free Version
+Handles health data submission and retrieval for testing without authentication
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import List, Dict, Any
@@ -12,7 +11,7 @@ import json
 
 # Imports
 from database.config import get_db
-from database.models import User, HealthRecord
+from database.models import HealthRecord
 from database.crud import (
     create_health_record,
     get_health_record,
@@ -25,7 +24,6 @@ from schemas.health_schema import (
     HealthRecordResponse,
     HealthDataSubmitResponse
 )
-from app.auth import get_current_user
 from Agents.reportanalyzer import ReportAnalyzerAgent
 from Agents.masterhealth import MasterHealthAgent
 
@@ -37,7 +35,7 @@ router = APIRouter(
     tags=["Health Data"]
 )
 
-# Initialize Report Analyzer Agent
+# Initialize Agents
 analyzer_agent = ReportAnalyzerAgent()
 master_agent = MasterHealthAgent()
 
@@ -63,41 +61,20 @@ def _build_analysis_summary(analysis: Dict[str, Any]) -> str:
 @router.post("/health-data", response_model=HealthDataSubmitResponse)
 async def submit_health_data(
     data: HealthInput,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    POST /api/v1/health/health-data
-    
-    Submit health data for full multi-agent health analysis
-    
-    Flow:
-    1. Validate input (Pydantic)
-    2. Authenticate user (JWT)
-    3. Store in database
-    4. Trigger Master Health Agent
-    5. Store workflow result
-    6. Return final risk, alert, and report
-    
-    Example Request:
-    {
-        "hba1c": 6.8,
-        "glucose": 148,
-        "bmi": 29,
-        "age": 45,
-        "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"],
-        "manual_text": "Family history of diabetes"
-    }
+    Submit health data for full multi-agent health analysis.
+    Auth removed for testing.
     """
     try:
-        logger.info(f"Health data submission from user {user.id} ({user.username})")
+        # Use a dummy user id for database storage
+        dummy_user_id = 1
+
+        # Store in database
+        record = create_health_record(db, dummy_user_id, data)
         
-        # Step 1 & 2: Already done by dependencies (Pydantic validation + JWT auth)
-        
-        # Step 3: Store in database
-        record = create_health_record(db, user.id, data)
-        
-        # Step 4: Trigger Master Health Agent
+        # Trigger Master Health Agent
         health_data_dict = {
             "hba1c": data.hba1c,
             "glucose": data.glucose,
@@ -111,12 +88,12 @@ async def submit_health_data(
             manual_text=data.manual_text,
         )
 
-        # Step 5: Store workflow result
+        # Store workflow result
         update_health_record_analysis(db, record.id, json.dumps(workflow_result))
         
         logger.info(f"Health record created successfully: ID={record.id}")
         
-        # Step 6: Return final orchestration result
+        # Return final orchestration result
         return HealthDataSubmitResponse(
             status="success",
             message="Health data stored and processed through the master health workflow",
@@ -138,16 +115,8 @@ async def submit_health_data(
 
 
 @router.get("/health-data/{record_id}", response_model=HealthRecordResponse)
-async def get_health_data(
-    record_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    GET /api/v1/health/health-data/{record_id}
-    
-    Retrieve a specific health record with analysis
-    """
+async def get_health_data(record_id: int, db: Session = Depends(get_db)):
+    """Retrieve a specific health record with analysis."""
     try:
         record = get_health_record(db, record_id)
         
@@ -155,16 +124,6 @@ async def get_health_data(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Health record not found"
-            )
-        
-        # Security check: ensure user owns the record
-        if record.user_id != user.id:
-            logger.warning(
-                f"User {user.id} attempted to access record {record_id} owned by {record.user_id}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
             )
         
         return record
@@ -180,21 +139,12 @@ async def get_health_data(
 
 
 @router.get("/health-data", response_model=List[HealthRecordResponse])
-async def get_user_health_data(
-    skip: int = 0,
-    limit: int = 100,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    GET /api/v1/health/health-data
-    
-    Retrieve all health records for current user
-    Supports pagination
-    """
+async def get_all_health_data(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """Retrieve all health records (auth removed)."""
     try:
-        records = get_user_health_records(db, user.id, skip, limit)
-        logger.info(f"Retrieved {len(records)} health records for user {user.id}")
+        # For testing, fetch all records without filtering by user
+        records = get_user_health_records(db, user_id=None, skip=skip, limit=limit)
+        logger.info(f"Retrieved {len(records)} health records (auth-free)")
         return records
     
     except Exception as e:
@@ -206,16 +156,8 @@ async def get_user_health_data(
 
 
 @router.get("/health-data/{record_id}/analysis")
-async def get_health_data_analysis(
-    record_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    GET /api/v1/health/health-data/{record_id}/analysis
-    
-    Get detailed analysis for a health record
-    """
+async def get_health_data_analysis(record_id: int, db: Session = Depends(get_db)):
+    """Get detailed analysis for a health record (auth removed)."""
     try:
         record = get_health_record(db, record_id)
         
@@ -223,13 +165,6 @@ async def get_health_data_analysis(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Health record not found"
-            )
-        
-        # Security check
-        if record.user_id != user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
             )
         
         if not record.analyzed or not record.analysis_result:
@@ -240,8 +175,6 @@ async def get_health_data_analysis(
         
         # Parse and return analysis
         analysis = json.loads(record.analysis_result)
-        
-        # Add summary for legacy or master workflow result
         analysis["summary"] = _build_analysis_summary(analysis)
         
         return {
@@ -261,17 +194,11 @@ async def get_health_data_analysis(
 
 
 @router.get("/latest")
-async def get_latest_record(
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    GET /api/v1/health/latest
-    
-    Get the most recent health record with analysis
-    """
+async def get_latest_record(db: Session = Depends(get_db)):
+    """Get the most recent health record (auth removed)."""
     try:
-        record = get_latest_health_record(db, user.id)
+        # For testing, pick the latest record regardless of user
+        record = get_latest_health_record(db, user_id=None)
         
         if not record:
             raise HTTPException(
@@ -290,7 +217,6 @@ async def get_latest_record(
             }
         }
         
-        # Include analysis if available
         if record.analyzed and record.analysis_result:
             analysis = json.loads(record.analysis_result)
             response["analysis"] = analysis
@@ -309,16 +235,8 @@ async def get_latest_record(
 
 
 @router.post("/analyze/{record_id}")
-async def reanalyze_record(
-    record_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    POST /api/v1/health/analyze/{record_id}
-    
-    Re-run the full master-agent analysis on an existing health record
-    """
+async def reanalyze_record(record_id: int, db: Session = Depends(get_db)):
+    """Re-run master-agent analysis on an existing health record (auth removed)."""
     try:
         record = get_health_record(db, record_id)
         
@@ -326,13 +244,6 @@ async def reanalyze_record(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Health record not found"
-            )
-        
-        # Security check
-        if record.user_id != user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
             )
         
         # Re-run master workflow

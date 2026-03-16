@@ -1,55 +1,28 @@
 """
-CRUD operations for database models
-Separates database logic from route handlers
+CRUD operations for database models (auth-free version)
+Handles health records without requiring authentication
 """
 from sqlalchemy.orm import Session
-from database.models import User, HealthRecord
+from database.models import HealthRecord
 from schemas.health_schema import HealthInput
 from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
-
-# ==================== USER CRUD ====================
-
-def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
-    """Get user by ID"""
-    return db.query(User).filter(User.id == user_id).first()
-
-
-def get_user_by_username(db: Session, username: str) -> Optional[User]:
-    """Get user by username"""
-    return db.query(User).filter(User.username == username).first()
-
-
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    """Get user by email"""
-    return db.query(User).filter(User.email == email).first()
-
-
-def create_user(db: Session, username: str, email: str, hashed_password: str) -> User:
-    """Create new user"""
-    db_user = User(
-        username=username,
-        email=email,
-        hashed_password=hashed_password
-    )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    logger.info(f"User created: {username} (ID: {db_user.id})")
-    return db_user
+# ==================== DUMMY USER ====================
+# Use this constant for auth-free testing
+USER_ID = 1
 
 
 # ==================== HEALTH RECORD CRUD ====================
 
-def create_health_record(db: Session, user_id: int, data: HealthInput) -> HealthRecord:
+def create_health_record(db: Session, data: HealthInput) -> HealthRecord:
     """
-    Create a new health record for a user
+    Create a new health record with a dummy user ID
     """
     record = HealthRecord(
-        user_id=user_id,
+        user_id=USER_ID,
         hba1c=data.hba1c,
         glucose=data.glucose,
         bmi=data.bmi,
@@ -59,7 +32,7 @@ def create_health_record(db: Session, user_id: int, data: HealthInput) -> Health
     db.commit()
     db.refresh(record)
     
-    logger.info(f"Health record created: ID={record.id}, User={user_id}")
+    logger.info(f"Health record created: ID={record.id}, User={USER_ID}")
     return record
 
 
@@ -70,14 +43,13 @@ def get_health_record(db: Session, record_id: int) -> Optional[HealthRecord]:
 
 def get_user_health_records(
     db: Session, 
-    user_id: int, 
     skip: int = 0, 
     limit: int = 100
 ) -> List[HealthRecord]:
-    """Get all health records for a user with pagination"""
+    """Get all health records for the dummy user with pagination"""
     return (
         db.query(HealthRecord)
-        .filter(HealthRecord.user_id == user_id)
+        .filter(HealthRecord.user_id == USER_ID)
         .order_by(HealthRecord.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -114,11 +86,11 @@ def delete_health_record(db: Session, record_id: int) -> bool:
     return False
 
 
-def get_latest_health_record(db: Session, user_id: int) -> Optional[HealthRecord]:
-    """Get the most recent health record for a user"""
+def get_latest_health_record(db: Session) -> Optional[HealthRecord]:
+    """Get the most recent health record for the dummy user"""
     return (
         db.query(HealthRecord)
-        .filter(HealthRecord.user_id == user_id)
+        .filter(HealthRecord.user_id == USER_ID)
         .order_by(HealthRecord.created_at.desc())
         .first()
     )

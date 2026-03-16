@@ -11,7 +11,7 @@ from database.config import init_db
 from utils.constants import LOG_FORMAT, LOG_LEVEL
 
 # Routes
-from app.authroutes import router as auth_router
+# from app.authroutes import router as auth_router
 from app.healthroutes import router as health_router
 
 # Load environment variables
@@ -113,7 +113,7 @@ async def health_check():
 
 
 # Include routers
-app.include_router(auth_router)
+# app.include_router(auth_router)
 app.include_router(health_router)
 
 
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=5000,
         reload=True,
         log_level="info"
     )
