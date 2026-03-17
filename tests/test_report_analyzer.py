@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from Agents.reportanalyzer import ReportAnalyzerAgent
+from Agents.reportanalyzer import ReportAnalyzerAgent, validate_parameters
 
 
 def test_report_analyzer_pdf_detects_abnormal():
@@ -17,6 +17,9 @@ def test_report_analyzer_pdf_detects_abnormal():
     assert "hba1c" in result["parameters"]
     assert result["parameters"]["hba1c"]["status"] == "High"
     assert result["parameters"]["bmi"]["status"] == "High"
+    assert result["parameters"]["hba1c"]["unit"] == "%"
+    assert "Diabetic range" in result["parameters"]["hba1c"]["note"]
+    assert "DIABETES CRITERIA MET" in result["endocrine_flags"]
 
 
 def test_report_analyzer_pdf_extracts_expected_values():
@@ -68,3 +71,17 @@ def test_report_analyzer_pdf_no_extractable_params(monkeypatch, tmp_path):
 
     assert result["status"] == "failed"
     assert "No health parameters" in result["error"]
+
+
+def test_validate_parameters_enriches_output_with_homa_ir():
+    result = validate_parameters(
+        {"hba1c": 6.7, "glucose": 131.0, "bmi": 27.0, "age": 41.0, "homa_ir": 3.1}
+    )
+
+    assert result["parameters"]["hba1c"]["unit"] == "%"
+    assert "Diabetic range" in result["parameters"]["hba1c"]["note"]
+    assert result["parameters"]["glucose"]["unit"] == "mg/dL"
+    assert "FPG diabetes criterion" in result["parameters"]["glucose"]["note"]
+    assert result["parameters"]["homa_ir"]["status"] == "High"
+    assert result["parameters"]["homa_ir"]["unit"] == "index"
+    assert "INSULIN RESISTANCE" in result["endocrine_flags"]
