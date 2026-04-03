@@ -1,6 +1,6 @@
 # AI Health System
 
-AI Health System is a multi-agent healthcare analysis platform built with FastAPI, LangChain, LangGraph, SQLAlchemy, and a React frontend.
+AI Health System is a multi-agent healthcare analysis platform built with FastAPI, LangChain, LangGraph and a React frontend.
 
 The project combines structured health data, symptom interpretation, risk reasoning, and alert/report generation into a coordinated agent workflow focused on diabetes and metabolic risk screening.
 
