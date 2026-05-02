@@ -61,6 +61,14 @@ from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+import os
+
+_DATASET_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "data",
+    "pima_diabetes.csv"
+)
+
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
 
@@ -532,7 +540,7 @@ class PimaModel:
         self._train()
 
     def _build_dataframe(self) -> pd.DataFrame:
-        df = pd.DataFrame(_PIMA_DATA, columns=_PIMA_COLS)
+        df = pd.read_csv(_DATASET_PATH)
         # Replace biologically impossible zeros with NaN, then impute with median
         for col in ["glucose", "blood_pressure", "skin_thickness", "insulin", "bmi"]:
             df[col] = df[col].replace(0, np.nan)
