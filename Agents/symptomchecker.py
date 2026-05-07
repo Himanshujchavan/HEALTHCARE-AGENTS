@@ -540,7 +540,14 @@ class PimaModel:
         self._train()
 
     def _build_dataframe(self) -> pd.DataFrame:
-        df = pd.read_csv(_DATASET_PATH)
+        if os.path.exists(_DATASET_PATH):
+            df = pd.read_csv(_DATASET_PATH)
+        else:
+            logger.warning(
+                "Pima dataset not found at %s; using bundled inline dataset",
+                _DATASET_PATH,
+            )
+            df = pd.DataFrame(_PIMA_DATA, columns=_PIMA_COLS)
         # Replace biologically impossible zeros with NaN, then impute with median
         for col in ["glucose", "blood_pressure", "skin_thickness", "insulin", "bmi"]:
             df[col] = df[col].replace(0, np.nan)

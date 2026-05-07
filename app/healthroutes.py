@@ -29,6 +29,8 @@ from schemas.health_schema import (
 from app.auth import get_current_user
 from Agents.reportanalyzer import ReportAnalyzerAgent
 from Agents.masterhealth import MasterHealthAgent
+from Agents.alertsystem import AlertAgent
+from Agents.symptomchecker import analyze_symptoms
 
 logger = logging.getLogger(__name__)
 
@@ -384,6 +386,173 @@ async def get_latest_record(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve latest record"
+        )
+
+
+@router.post("/agents/report-analyzer")
+async def debug_report_analyzer(
+    payload: Dict[str, Any],
+    use_agent: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Debug route: run ReportAnalyzerAgent directly."""
+    try:
+        analysis_json = analyzer_agent.analyze_health_record(payload, use_agent=use_agent)
+        return {
+            "status": "success",
+            "analysis": json.loads(analysis_json),
+        }
+    except Exception as e:
+        logger.error("Debug report analyzer failed: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Report analyzer debug failed",
+        )
+
+
+@router.post("/agents/symptom-checker")
+async def debug_symptom_checker(
+    payload: Dict[str, Any],
+    use_llm: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Debug route: run SymptomChecker agent directly."""
+    try:
+        symptoms = payload.get("symptoms") or []
+        lab_values = payload.get("lab_values")
+        report_context = payload.get("report_context")
+        risk_context = payload.get("risk_context")
+        manual_text = payload.get("manual_text")
+
+        result = analyze_symptoms(
+            symptoms=symptoms,
+            lab_values=lab_values,
+            report_context=report_context,
+            risk_context=risk_context,
+            manual_text=manual_text,
+            use_llm=use_llm,
+        )
+
+        return {
+            "status": "success",
+            "result": result,
+        }
+    except Exception as e:
+        logger.error("Debug symptom checker failed: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Symptom checker debug failed",
+        )
+
+
+@router.post("/agents/risk-predictor")
+async def debug_risk_predictor(
+    payload: Dict[str, Any],
+    user: User = Depends(get_current_user),
+):
+    """Debug route: run RiskPredictorAgent directly."""
+    try:
+        # Lazy import so app can start without optional LLM dependencies.
+        from Agents.riskpredictor import RiskPredictorAgent, run_risk_assessment
+
+        if "message" in payload:
+            result = run_risk_assessment(
+                message=str(payload.get("message", "")),
+                session_id=payload.get("session_id"),
+            )
+            return {
+                "status": "success",
+                **result,
+            }
+
+        analysis = payload.get("analysis") or payload
+        predictor = RiskPredictorAgent()
+        risk_json = predictor.predict_from_analysis(analysis)
+        return {
+            "status": "success",
+            "risk": json.loads(risk_json),
+        }
+    except Exception as e:
+        logger.error("Debug risk predictor failed: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Risk predictor debug failed",
+        )
+
+
+@router.post("/agents/alert")
+async def debug_alert_agent(
+    payload: Dict[str, Any],
+    use_llm: bool = False,
+    user: User = Depends(get_current_user),
+):
+    """Debug route: run AlertAgent directly."""
+    try:
+        agent = AlertAgent(use_llm=use_llm)
+        result = agent.process(payload)
+        return {
+            "status": "success",
+            "alert": result,
+        }
+    except Exception as e:
+        logger.error("Debug alert agent failed: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Alert agent debug failed",
+        )
+
+
+@router.post("/agents/master")
+async def debug_master_agent(
+    payload: Dict[str, Any],
+    user: User = Depends(get_current_user),
+):
+    """Debug route: run MasterHealthAgent directly."""
+    try:
+        include_risk = bool(payload.get("include_risk", True))
+        include_symptom = bool(payload.get("include_symptom", True))
+        include_alert = bool(payload.get("include_alert", True))
+        symptoms = payload.get("symptoms")
+        manual_text = payload.get("manual_text")
+
+        if payload.get("pdf_path"):
+            result = master_agent.process_pdf_report(
+                pdf_path=payload["pdf_path"],
+                use_llm=bool(payload.get("use_llm", False)),
+                symptoms=symptoms,
+                manual_text=manual_text,
+                include_risk=include_risk,
+                include_symptom=include_symptom,
+                include_alert=include_alert,
+            )
+        else:
+            health_data = payload.get("health_data") or {}
+            if not health_data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Provide health_data or pdf_path in the payload",
+                )
+
+            result = master_agent.process_health_data(
+                health_data=health_data,
+                symptoms=symptoms,
+                manual_text=manual_text,
+                include_risk=include_risk,
+                include_symptom=include_symptom,
+                include_alert=include_alert,
+            )
+
+        return {
+            "status": "success",
+            "result": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Debug master agent failed: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Master agent debug failed",
         )
 
 
