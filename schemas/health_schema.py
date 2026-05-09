@@ -45,6 +45,10 @@ class HealthInput(BaseModel):
         max_length=1000,
         description="Optional free-text clinical context or patient notes"
     )
+    use_llm: Optional[bool] = Field(
+        default=False,
+        description="Use LLM enhancement for nuanced summaries"
+    )
 
     @field_validator('hba1c', 'glucose', 'bmi')
     @classmethod
@@ -62,7 +66,8 @@ class HealthInput(BaseModel):
                 "bmi": 29.0,
                 "age": 45,
                 "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"],
-                "manual_text": "Family history of Type 2 diabetes"
+                "manual_text": "Family history of Type 2 diabetes",
+                "use_llm": False
             }
         }
 

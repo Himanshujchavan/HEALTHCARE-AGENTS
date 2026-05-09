@@ -3,7 +3,7 @@
 Handles health data submission, PDF uploads, retrieval,
 and orchestration through the master health workflow.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +67,8 @@ def _build_analysis_summary(analysis: Dict[str, Any]) -> str:
 async def upload_health_report(
     file: UploadFile = File(...),
     use_llm: bool = False,
+    symptoms: List[str] = Form(default_factory=list),
+    manual_text: str | None = Form(default=None),
     user: User = Depends(get_current_user),
 ):
     """Upload a PDF lab report and run it through the master health workflow.
@@ -109,6 +111,8 @@ async def upload_health_report(
         workflow_result = master_agent.process_pdf_report(
             pdf_path=str(stored_path),
             use_llm=use_llm,
+            symptoms=symptoms or [],
+            manual_text=manual_text,
         )
 
         steps = workflow_result.get("steps", {})
@@ -190,6 +194,7 @@ async def submit_health_data(
         workflow_result = master_agent.process_health_data(
             health_data=health_data_dict,
             manual_text=data.manual_text,
+            use_llm=bool(data.use_llm),
         )
 
         # Step 5: Store workflow result

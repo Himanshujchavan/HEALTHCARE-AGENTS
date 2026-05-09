@@ -216,6 +216,9 @@ def generate_alert_node(state: HealthWorkflowState) -> dict:
             "diabetes_probability": (state.get("final_assessment") or {}).get("score"),
             "abnormal_parameters": (state.get("analysis_result") or {}).get("abnormal_count", 0),
             "symptom_score": (state.get("final_assessment") or {}).get("symptom_score"),
+            "symptoms": state.get("symptoms") or [],
+            "symptom_result": state.get("symptom_result") or {},
+            "manual_text": state.get("manual_text"),
         }
         alert_result = alert_agent.process(payload)
 
@@ -634,6 +637,7 @@ class MasterHealthAgent:
     def process_health_data(self, health_data: Dict[str, Any],
                             symptoms: Optional[List[str]] = None,
                             manual_text: Optional[str] = None,
+                            use_llm: bool = False,
                             include_risk: bool = True,
                             include_symptom: bool = True,
                             include_alert: bool = True) -> Dict[str, Any]:
@@ -663,7 +667,7 @@ class MasterHealthAgent:
             "include_alert": include_alert,
             "input_type": "data",
             "pdf_path": None,
-            "use_llm": False,
+            "use_llm": use_llm,
             "analysis_result": None,
             "risk_result": None,
             "symptom_result": None,

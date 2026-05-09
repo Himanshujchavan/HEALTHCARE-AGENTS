@@ -50,7 +50,7 @@ class AlertAgent:
 		self,
 		thresholds: Optional[AlertThresholds] = None,
 		use_llm: bool = True,
-		llm_model: str = "mistral",
+		llm_model: str = "qwen2.5:3b",
 	):
 		self.thresholds = thresholds or AlertThresholds()
 		self.use_llm = use_llm
@@ -254,7 +254,7 @@ class AlertAgent:
 			if report:
 				return report
 
-		return self._generate_report_fallback(evaluation)
+		return self._generate_report_fallback(result, evaluation)
 
 	def _generate_report_with_llm(
 		self,
@@ -266,19 +266,21 @@ class AlertAgent:
 
 		try:
 			llm = Ollama(model=self.llm_model)
+			context = self._build_compact_llm_context(result, evaluation)
 			prompt = ChatPromptTemplate.from_messages(
 				[
 					(
 						"system",
 						"You are a healthcare communication assistant. "
-						"Write a short, clear, patient-friendly report in simple English. "
-						"Avoid medical jargon. Keep to 3-5 sentences. "
-						"Include: what is abnormal, risk level, and what to do next.",
+						"Write a concise, patient-friendly report in simple English. "
+						"Use 5-7 short sentences. Avoid medical jargon and do not diagnose. "
+						"Include risk level, key lab or symptom drivers, and next steps. "
+						"If symptoms like chest discomfort or shortness of breath are present, "
+						"mention urgent evaluation if severe or worsening.",
 					),
 					(
 						"user",
-						"Health system output: {result}\n"
-						"Evaluation summary: {evaluation}\n"
+						"Context (key fields only): {context}\n"
 						"Generate the final report text only.",
 					),
 				]
@@ -287,8 +289,7 @@ class AlertAgent:
 			chain = prompt | llm
 			response = chain.invoke(
 				{
-					"result": json.dumps(result, default=str),
-					"evaluation": json.dumps(evaluation, default=str),
+					"context": json.dumps(context, default=str),
 				}
 			)
 
@@ -300,48 +301,231 @@ class AlertAgent:
 			logger.warning(f"Alert report LLM generation failed, using fallback: {exc}")
 			return None
 
-	def _generate_report_fallback(self, evaluation: Dict[str, Any]) -> str:
+	def _generate_report_fallback(self, result: Dict[str, Any], evaluation: Dict[str, Any]) -> str:
 		metrics = evaluation["metrics"]
 		level = evaluation["risk_level"]
 		alert = evaluation["alert"]
 
 		notes: List[str] = []
-
-		if metrics.get("hba1c") is not None:
-			if metrics["hba1c"] > self.thresholds.hba1c:
-				notes.append("Your HbA1c level is above the normal range.")
-			else:
-				notes.append("Your HbA1c level is currently within acceptable range.")
-
-		if metrics.get("glucose") is not None:
-			if metrics["glucose"] >= 126:
-				notes.append("Your glucose value is elevated and needs attention.")
-			elif metrics["glucose"] >= 100:
-				notes.append("Your glucose is slightly high and should be monitored.")
-			else:
-				notes.append("Your glucose is in the expected range.")
-
-		if metrics.get("bmi") is not None:
-			if metrics["bmi"] >= 30:
-				notes.append("Your BMI suggests obesity, which can increase diabetes risk.")
-			elif metrics["bmi"] >= 25:
-				notes.append("Your BMI is in the overweight range.")
+		lab_summary = self._build_lab_summary(result)
+		symptom_context = self._build_symptom_context(result)
 
 		if metrics.get("diabetes_probability") is not None:
 			percentage = int(round(metrics["diabetes_probability"] * 100))
 			notes.append(f"Estimated diabetes risk probability is about {percentage}%.")
 
+		if metrics.get("hba1c") is not None:
+			if metrics["hba1c"] > self.thresholds.hba1c:
+				notes.append("HbA1c is above the typical range, which can indicate higher long-term blood sugar.")
+			else:
+				notes.append("HbA1c is within the typical range.")
+
+		if metrics.get("glucose") is not None:
+			if metrics["glucose"] >= 126:
+				notes.append("Glucose is elevated and may signal impaired blood sugar control.")
+			elif metrics["glucose"] >= 100:
+				notes.append("Glucose is mildly elevated and should be monitored.")
+			else:
+				notes.append("Glucose is within the expected range.")
+
+		if metrics.get("bmi") is not None:
+			if metrics["bmi"] >= 30:
+				notes.append("BMI is in the obesity range, which can increase metabolic risk.")
+			elif metrics["bmi"] >= 25:
+				notes.append("BMI is in the overweight range.")
+
 		recommendation = (
-			"Please consult a healthcare professional soon for a complete evaluation."
+			"Please arrange a clinical follow-up soon to review these results and discuss confirmatory tests."
 			if alert
-			else "Continue a healthy lifestyle and schedule routine monitoring."
+			else "Continue healthy habits and schedule routine monitoring with your clinician."
 		)
 
-		base = " ".join(notes).strip()
-		if not base:
-			base = "Your recent health data was reviewed."
+		base = " ".join(notes).strip() or "Your recent health data was reviewed."
 
-		return f"{base} Risk Level: {level}. {recommendation}"
+		parts = [
+			f"{base} Risk Level: {level}.",
+		]
+		if lab_summary:
+			parts.append(f"Lab details: {lab_summary}")
+		if symptom_context:
+			parts.append(symptom_context)
+		parts.append(recommendation)
+
+		return " ".join(parts).strip()
+
+	def _build_compact_llm_context(
+		self,
+		result: Dict[str, Any],
+		evaluation: Dict[str, Any],
+	) -> Dict[str, Any]:
+		metrics = evaluation.get("metrics", {})
+		symptom_info = self._extract_symptom_info(result)
+		symptom_result = result.get("symptom_result") or {}
+
+		return {
+			"risk_level": evaluation.get("risk_level"),
+			"alert": evaluation.get("alert"),
+			"triggers": evaluation.get("triggers") or [],
+			"metrics": {
+				"diabetes_probability": metrics.get("diabetes_probability"),
+				"hba1c": metrics.get("hba1c"),
+				"glucose": metrics.get("glucose"),
+				"bmi": metrics.get("bmi"),
+				"abnormal_parameters": metrics.get("abnormal_parameters"),
+			},
+			"abnormal_labs": self._collect_abnormal_labs(result, limit=5),
+			"symptoms": (symptom_info.get("symptoms") or [])[:6],
+			"matched_symptoms": (symptom_info.get("matched_symptoms") or [])[:5],
+			"unmatched_symptoms": (symptom_info.get("unmatched_symptoms") or [])[:5],
+			"symptom_alignment": symptom_result.get("symptom_alignment"),
+			"severity_score": symptom_result.get("severity_score"),
+			"top_hypothesis": symptom_info.get("top_hypothesis"),
+		}
+
+	def _build_lab_summary(self, result: Dict[str, Any]) -> str:
+		analysis_result = result.get("analysis_result") or {}
+		params = analysis_result.get("parameters") or {}
+		if not isinstance(params, dict) or not params:
+			return ""
+
+		abnormal_items = []
+		normal_items = []
+		for key, details in params.items():
+			if not isinstance(details, dict):
+				continue
+			status = details.get("status")
+			value = details.get("value")
+			unit = details.get("unit") or ""
+			note = details.get("note")
+			label = f"{key.upper()} {value} {unit}".strip()
+			if note:
+				label = f"{label} ({note})"
+			if status and status != "Normal":
+				abnormal_items.append(label)
+			else:
+				normal_items.append(label)
+
+		parts = []
+		if abnormal_items:
+			parts.append("Abnormal: " + ", ".join(abnormal_items))
+		if normal_items:
+			parts.append("Normal: " + ", ".join(normal_items[:3]))
+		return "; ".join(parts)
+
+	def _collect_abnormal_labs(
+		self,
+		result: Dict[str, Any],
+		limit: int = 5,
+	) -> List[Dict[str, Any]]:
+		analysis_result = result.get("analysis_result") or {}
+		params = analysis_result.get("parameters") or {}
+		if not isinstance(params, dict):
+			return []
+
+		abnormal_items: List[Dict[str, Any]] = []
+		for key, details in params.items():
+			if not isinstance(details, dict):
+				continue
+			status = details.get("status")
+			if status and status != "Normal":
+				item = {
+					"name": key,
+					"value": details.get("value"),
+					"unit": details.get("unit") or "",
+					"status": status,
+				}
+				note = details.get("note")
+				if note:
+					item["note"] = note
+				abnormal_items.append(item)
+
+		return abnormal_items[:limit]
+
+	def _build_symptom_context(self, result: Dict[str, Any]) -> str:
+		info = self._extract_symptom_info(result)
+		if not info["symptoms"] and not info["unmatched_symptoms"]:
+			return ""
+
+		lines: List[str] = []
+		if info["matched_symptoms"] and info["top_hypothesis"]:
+			lines.append(
+				"Symptoms matching diabetes patterns ("
+				f"{info['top_hypothesis']}): "
+				+ ", ".join(info["matched_symptoms"][:5])
+				+ ".")
+		elif info["symptoms"]:
+			lines.append("Symptoms reported: " + ", ".join(info["symptoms"][:6]) + ".")
+
+		non_diabetes_notes = self._build_non_diabetes_notes(info["symptoms"], info["unmatched_symptoms"])
+		if non_diabetes_notes:
+			lines.append("Other health considerations: " + " ".join(non_diabetes_notes))
+
+		if info["unmatched_symptoms"]:
+			lines.append(
+				"Symptoms not typical for diabetes patterns were noted: "
+				+ ", ".join(info["unmatched_symptoms"][:6])
+				+ "."
+			)
+
+		return " ".join(lines).strip()
+
+	def _extract_symptom_info(self, result: Dict[str, Any]) -> Dict[str, Any]:
+		symptoms = result.get("symptoms") or []
+		if isinstance(symptoms, str):
+			symptoms = [s.strip() for s in symptoms.split(",") if s.strip()]
+		if not isinstance(symptoms, list):
+			symptoms = []
+
+		symptom_result = result.get("symptom_result") or {}
+		mapping = symptom_result.get("symptom_mapping") or {}
+		matched_symptoms: List[str] = []
+		if mapping.get("condition_hypotheses"):
+			first = mapping["condition_hypotheses"][0]
+			matched_symptoms = first.get("matched_symptoms") or []
+		unmatched = mapping.get("unmatched_symptoms") or []
+
+		return {
+			"symptoms": symptoms,
+			"top_hypothesis": mapping.get("top_hypothesis"),
+			"matched_symptoms": matched_symptoms,
+			"unmatched_symptoms": unmatched,
+		}
+
+	def _build_non_diabetes_notes(self, symptoms: List[str], unmatched: List[str]) -> List[str]:
+		all_symptoms = [s.lower() for s in (symptoms or [])]
+		all_symptoms += [s.lower() for s in (unmatched or [])]
+		text = " | ".join(all_symptoms)
+
+		notes = []
+		if "chest" in text or "chest discomfort" in text:
+			notes.append(
+				"Chest discomfort can be related to heart or lung issues; seek urgent care if severe, worsening, or with shortness of breath."
+			)
+		if "shortness of breath" in text:
+			notes.append(
+				"Shortness of breath can have heart, lung, anemia, or infection causes; urgent evaluation is needed if it is sudden or severe."
+			)
+		if "dizziness" in text or "lightheaded" in text:
+			notes.append(
+				"Dizziness can be linked to dehydration, blood pressure changes, inner ear issues, or medication effects; fainting is a red flag."
+			)
+		if "tingling" in text or "numb" in text:
+			notes.append(
+				"Tingling can also come from nerve compression or vitamin deficiencies, not only diabetes-related neuropathy."
+			)
+		if "blurred vision" in text or "vision" in text:
+			notes.append(
+				"Blurred vision can also be related to eye conditions or blood pressure changes."
+			)
+		if "weight loss" in text:
+			notes.append(
+				"Unexplained weight loss can have multiple causes, including thyroid or other systemic conditions."
+			)
+		if "fatigue" in text or "low energy" in text:
+			notes.append(
+				"Fatigue can be related to sleep issues, anemia, thyroid problems, or infection."
+			)
+		return notes
 
 	def _build_notification(self, evaluation: Dict[str, Any]) -> str:
 		"""Create short warning/reassurance notification text."""

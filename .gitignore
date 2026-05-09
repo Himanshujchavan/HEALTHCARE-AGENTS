@@ -1,13 +1,38 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.egg-info/
+
+# Environment
 .env
 .env.*
+
+# Database
 *.db
 health_app.db
+
+# Logs
 logs/
 *.log
-.DS_Store
-*.egg-info/
+
+# Build
 dist/
-build/venv/
+build/
+
+# Frontend
+node_modules/
+.next/
+frontend/node_modules/
+frontend/dist/
+
+# Testing
+.pytest_cache/
+
+# Vector DB / embeddings
+data/faiss_index/
+
+# OS
+.DS_Store
+

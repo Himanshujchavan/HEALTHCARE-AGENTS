@@ -9,7 +9,7 @@ Upgrades over v2:
                                    predicts diabetes probability from lab values
   3. Accuracy measurement       — precision, recall, F1, ROC-AUC, confusion matrix
                                    computed via 5-fold cross-validation on Pima data
-  4. Clinical reasoning         — DeepSeek-R1 8B (unchanged, Ollama)
+  4. Clinical reasoning         — Qwen 2.5 3B (unchanged, Ollama)
 
 Covers all diabetes types and diabetes-related conditions:
   - Type 1 Diabetes
@@ -75,9 +75,9 @@ logger = logging.getLogger(__name__)
 OLLAMA_TAGS = "http://localhost:11434/api/tags"
 
 REASONING_MODEL = {
-    "id":       "deepseek-r1:8b",
-    "name":     "DeepSeek-R1 8B",
-    "pull_cmd": "ollama pull deepseek-r1:8b",
+    "id":       "qwen2.5:3b",
+    "name":     "Qwen 2.5 3B",
+    "pull_cmd": "ollama pull qwen2.5:3b",
 }
 
 # Path where the trained Pima model is cached after first training
@@ -841,7 +841,7 @@ def build_context(
 ) -> str:
     """
     Normalise upstream agent outputs, Pima prediction, and free text
-    into a single prompt string for DeepSeek-R1.
+    into a single prompt string for Qwen 2.5 3B.
     """
     parts: List[str] = []
 
@@ -892,7 +892,7 @@ def build_context(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6 — LLM COMPONENTS (unchanged from v2)
+#  SECTION 6 — LLM COMPONENTS 
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _clean_llm_output(text: str) -> str:
@@ -947,7 +947,7 @@ def _build_chain():
             (a for a in available if REASONING_MODEL["id"].split(":")[0] in a), None
         )
         if not model_id:
-            logger.warning(f"DeepSeek-R1 not found. Run: {REASONING_MODEL['pull_cmd']}")
+            logger.warning(f"Qwen 2.5 3B not found. Run: {REASONING_MODEL['pull_cmd']}")
             return None
 
         llm   = Ollama(model=model_id, temperature=0.2, num_predict=1200)
@@ -1069,7 +1069,7 @@ def analyze_symptoms(
           "pima_prediction":  { probability, prediction, risk_level, ... },
           "pima_metrics":     { accuracy, precision, recall, f1, roc_auc, ... },
           "reasoning":        str,
-          "model_used":       "deepseek-r1:8b" | "rule-based",
+          "model_used":       "qwen2.5:3b" | "rule-based",
           "input_summary":    { symptoms_count, sources_used, top_hypothesis },
         }
     """

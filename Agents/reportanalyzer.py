@@ -1,30 +1,24 @@
 """
-Report Analyzer Agent — LangChain Implementation
+Report Analyzer Agent — Rule-based Implementation
 
 Purpose:
-  Checks lab values and identifies abnormal parameters
-  before sending data to the ML model.
+    Checks lab values and identifies abnormal parameters
+    before sending data to the ML model.
 
 Steps:
-  1. Define reference ranges
-  2. Validate parameters against ranges
-  3. Expose as LangChain @tool
-  4. Create LangChain Agent (initialize_agent + Ollama)
-  5. Run the agent
+    1. Define reference ranges
+    2. Validate parameters against ranges
+    3. Expose as LangChain @tool
+    4. Return structured output
 """
 
 import logging
 import json
-import ast
 from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
 
 from langchain.tools import tool
-from langchain_community.llms import Ollama
-from langchain_community.chat_models import ChatOllama
-from langchain_core.messages import HumanMessage
-from langgraph.prebuilt import create_react_agent
 
 from utils.constants import REFERENCE_RANGES
 
@@ -159,52 +153,19 @@ def analyze_lab_values(data: dict) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STEP 4 — LangChain Agent
+#  STEP 4 — LLM-Disabled Compatibility Shims
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_analyzer_agent():
-    """
-    Build and return a LangGraph ReAct agent wired to the analyze_lab_values tool.
-    """
-    llm = ChatOllama(model="mistral", temperature=0)
-    agent = create_react_agent(llm, tools=[analyze_lab_values])
-    return agent
-
-
-def _extract_analyzer_tool_payload(agent_response: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract analyze_lab_values tool output from a LangGraph response."""
-    messages = agent_response.get("messages", []) if isinstance(agent_response, dict) else []
-    for msg in reversed(messages):
-        if getattr(msg, "name", "") != "analyze_lab_values":
-            continue
-
-        content = getattr(msg, "content", "")
-        if isinstance(content, dict):
-            return content
-        if isinstance(content, str):
-            try:
-                parsed = json.loads(content)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                try:
-                    parsed = ast.literal_eval(content)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except Exception:
-                    continue
-    return {}
+    """LLM analyzer disabled; retained for backward compatibility."""
+    logger.info("LLM analyzer disabled; using rule-based validation.")
+    return None
 
 
 def analyze_with_langgraph_agent(data: Dict[str, float]) -> Dict[str, Any]:
-    """Run analyzer through the LangGraph ReAct agent and return structured output."""
-    agent = create_analyzer_agent()
-    prompt = (
-        "Use the analyze_lab_values tool exactly once with this payload and return only that result: "
-        f"{json.dumps(data)}"
-    )
-    response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
-    return _extract_analyzer_tool_payload(response)
+    """LLM analyzer disabled; return rule-based validation output."""
+    logger.info("LLM analyzer disabled; using rule-based validation.")
+    return validate_parameters(data)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,16 +196,8 @@ class ReportAnalyzerAgent:
         try:
             logger.info("Starting health record analysis")
             if use_agent:
-                try:
-                    result = analyze_with_langgraph_agent(health_data)
-                    if not result:
-                        logger.warning("Agent returned no structured payload; falling back to direct validation")
-                        result = validate_parameters(health_data)
-                except Exception as agent_error:
-                    logger.warning(f"Agent analysis failed, falling back to direct validation: {agent_error}")
-                    result = validate_parameters(health_data)
-            else:
-                result = validate_parameters(health_data)
+                logger.info("use_agent requested, but LLM analyzer is disabled; using rule-based validation")
+            result = validate_parameters(health_data)
             result["analysis_timestamp"] = str(datetime.now())
             result["analyzer_version"] = "2.0"
             logger.info("Analysis completed successfully")
@@ -302,7 +255,7 @@ __all__ = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STEP 5 — Run the agent
+#  STEP 5 — Run the analyzer
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
@@ -322,13 +275,8 @@ if __name__ == "__main__":
     result = validate_parameters(data)
     print(json.dumps(result, indent=2))
 
-    # --- Via LangChain Agent (requires Ollama running locally) ---
-    try:
-        print("\nLangChain Agent")
-        print("=" * 50)
-        agent_result = analyze_with_langgraph_agent(data)
-        if not agent_result:
-            agent_result = validate_parameters(data)
-        print(json.dumps(agent_result, indent=2))
-    except Exception as e:
-        print(f"LangChain agent skipped ({e})")
+    # --- Agent mode (LLM disabled, rule-based) ---
+    print("\nAgent mode (LLM disabled)")
+    print("=" * 50)
+    agent_result = analyze_with_langgraph_agent(data)
+    print(json.dumps(agent_result, indent=2))
