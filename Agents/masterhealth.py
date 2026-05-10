@@ -271,7 +271,6 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
             symptom_result = analyze_symptoms(
                 symptoms=symptoms,
                 report_context=state.get("analysis_result"),
-                risk_context=state.get("risk_result"),
                 manual_text=manual_text,
                 use_llm=state.get("use_llm", False),
             )
