@@ -1,43 +1,46 @@
 """
-Symptom Analyzer Agent — Diabetes (v3)
-=======================================
-Upgrades over v2:
+Symptom Analyzer Agent — Diabetes + Complications (v4 - Qwen 2.5 3B)
+======================================================================
+Upgrades:
   1. Semantic symptom matching  — TF-IDF + medical synonym expansion
-                                   replaces exact string equality
-  2. Dataset integration        — Pima Indians Diabetes Dataset (UCI, 768 patients)
-                                   trains a LogisticRegression classifier that
-                                   predicts diabetes probability from lab values
+  2. Dataset integration        — Pima Indians Diabetes Dataset
   3. Accuracy measurement       — precision, recall, F1, ROC-AUC, confusion matrix
-                                   computed via 5-fold cross-validation on Pima data
-  4. Clinical reasoning         — Qwen 2.5 3B (unchanged, Ollama)
+  4. Clinical reasoning         — Qwen 2.5 3B (Ollama, lightweight model)
+  5. Complication risk assessment — 4 critical secondary conditions:
+                                    Cardiovascular (heart attack / CAD)
+                                    Cerebrovascular (stroke / brain hemorrhage)
+                                    Renal / Diabetic Nephropathy
+                                    Diabetic Retinopathy
+  6. Emergency flagging         — immediate CRITICAL alert for active emergencies
+  7. Complication severity score — 0-100 composite score per domain
 
-Covers all diabetes types and diabetes-related conditions:
-  - Type 1 Diabetes
-  - Type 2 Diabetes
-  - Pre-diabetes / Insulin Resistance
-  - Gestational Diabetes
-  - Hypoglycemia
-  - Diabetic Peripheral Neuropathy
-  - Diabetic Autonomic Neuropathy
-  - Diabetic Ketoacidosis (DKA)
+Covers all diabetes types:
+  - Type 1 Diabetes, Type 2 Diabetes, Pre-diabetes / Insulin Resistance
+  - Gestational Diabetes, Hypoglycemia, Diabetic Peripheral Neuropathy
+  - Diabetic Autonomic Neuropathy, Diabetic Ketoacidosis (DKA)
 
-Does NOT validate lab values or classify risk scores.
-Those belong to ReportAnalyzerAgent and RiskPredictorAgent.
+— Diabetes-associated complication domains:
+  - Cardiovascular Risk (heart attack, CAD, heart failure)
+  - Cerebrovascular Risk (stroke, TIA, brain hemorrhage)
+  - Renal / Kidney Complications (nephropathy, CKD, kidney failure)
+  - Diabetic Retinopathy (vision loss, macular edema, blindness)
+
+Does NOT take input from RiskPredictorAgent.
+Lab validation belongs to ReportAnalyzerAgent.
 
 Dataset reference:
   Smith, J.W. et al. (1988). Using the ADAP learning algorithm to forecast the
-  onset of diabetes mellitus. Proceedings of the Symposium on Computer Applications
-  in Medical Care (pp. 261-265). UCI ML Repository — public domain.
+  onset of diabetes mellitus. SCAMC pp. 261-265. UCI ML Repository — public domain.
 
 Inputs (any combination):
   - symptoms       : list of symptom strings (checkboxes OR free-text paraphrases)
   - lab_values     : dict for Pima model {"glucose":148,"bmi":29,"age":45,...}
   - report_context : dict from ReportAnalyzerAgent
-  - risk_context   : dict from RiskPredictorAgent
   - manual_text    : free-text from user
 """
 
 import re
+import os
 import logging
 import pickle
 import warnings
@@ -61,8 +64,6 @@ from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-import os
-
 _DATASET_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "data",
@@ -80,12 +81,11 @@ REASONING_MODEL = {
     "pull_cmd": "ollama pull qwen2.5:3b",
 }
 
-# Path where the trained Pima model is cached after first training
 _MODEL_CACHE_PATH = Path(__file__).parent / "pima_model_cache.pkl"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — SYMPTOM TAXONOMY (unchanged from v2)
+#  SECTION 1 — SYMPTOM TAXONOMY
 # ══════════════════════════════════════════════════════════════════════════════
 
 SYMPTOM_CATEGORIES: Dict[str, List[str]] = {
@@ -153,6 +153,46 @@ SYMPTOM_CATEGORIES: Dict[str, List[str]] = {
         "Resting tachycardia (fast heart rate at rest)",
         "Hypoglycemia unawareness (no warning symptoms before low blood sugar)",
     ],
+    "Cardiovascular Complications": [
+        "Chest pain or pressure",
+        "Chest tightness or heaviness",
+        "Pain radiating to left arm or jaw",
+        "Shortness of breath at rest or exertion",
+        "Unexplained sweating with chest discomfort",
+        "Rapid or irregular heartbeat",
+        "Swelling in legs or ankles (oedema)",
+        "Fatigue with minimal exertion",
+    ],
+    "Cerebrovascular Complications (Stroke)": [
+        "Sudden severe headache",
+        "Sudden weakness on one side of body",
+        "Sudden numbness in face, arm, or leg",
+        "Sudden confusion or difficulty speaking",
+        "Slurred speech",
+        "Drooping of face on one side",
+        "Sudden vision loss in one or both eyes",
+        "Sudden difficulty walking or loss of balance",
+    ],
+    "Renal / Kidney Complications": [
+        "Foamy or frothy urine (proteinuria)",
+        "Reduced urine output",
+        "Swelling in ankles, feet, or face (oedema)",
+        "Itching or dry skin (uraemic pruritus)",
+        "Nausea or vomiting (uraemia)",
+        "Muscle cramps",
+        "High blood pressure that is difficult to control",
+        "Frequent urination at night (nocturia)",
+    ],
+    "Diabetic Retinopathy / Eye Complications": [
+        "Dark spots or floaters in vision",
+        "Partial vision loss",
+        "Sudden complete vision loss in one eye",
+        "Flashes of light in vision",
+        "Distorted or wavy central vision",
+        "Difficulty seeing at night",
+        "Colours appearing faded or washed out",
+        "Eye pain or pressure",
+    ],
 }
 
 _CONDITION_SYMPTOM_MAP: Dict[str, List[str]] = {
@@ -210,14 +250,360 @@ _CONDITION_SYMPTOM_MAP: Dict[str, List[str]] = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 1B — COMPLICATION RISK PROFILES & EMERGENCY FLAGS
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COMPLICATION_PROFILES: Dict[str, Dict] = {
+    "Cardiovascular Risk (Heart Attack / CAD)": {
+        "description": (
+            "Diabetes doubles the risk of heart disease and heart attack. "
+            "Hyperglycaemia damages coronary arteries and promotes atherosclerosis."
+        ),
+        "symptoms": [
+            "Chest pain or pressure",
+            "Chest tightness or heaviness",
+            "Pain radiating to left arm or jaw",
+            "Shortness of breath at rest or exertion",
+            "Unexplained sweating with chest discomfort",
+            "Rapid or irregular heartbeat",
+            "Palpitations / rapid heartbeat",
+            "Swelling in legs or ankles (oedema)",
+            "Fatigue with minimal exertion",
+            "Nausea with chest discomfort",
+            "Dizziness or lightheadedness",
+            "Elevated blood pressure",
+        ],
+        "weights": {
+            "Chest pain or pressure": 30,
+            "Chest tightness or heaviness": 28,
+            "Pain radiating to left arm or jaw": 35,
+            "Shortness of breath at rest or exertion": 20,
+            "Unexplained sweating with chest discomfort": 25,
+            "Rapid or irregular heartbeat": 15,
+            "Palpitations / rapid heartbeat": 12,
+            "Swelling in legs or ankles (oedema)": 10,
+            "Fatigue with minimal exertion": 8,
+            "Nausea with chest discomfort": 15,
+            "Dizziness or lightheadedness": 8,
+            "Elevated blood pressure": 10,
+        },
+        "emergency_threshold": 55,
+        "specialist": "Cardiologist",
+        "tests": "ECG, Troponin I/T, echocardiogram, stress test, coronary angiography",
+        "action": (
+            "Cardiology referral. Immediate ECG if chest pain present. "
+            "Aspirin therapy, statin, BP control. Optimise glycaemic control."
+        ),
+    },
+    "Cerebrovascular Risk (Stroke / Brain Hemorrhage)": {
+        "description": (
+            "Diabetics have 2-4x higher stroke risk due to vascular damage, "
+            "hypertension, and hypercoagulability caused by chronic hyperglycaemia."
+        ),
+        "symptoms": [
+            "Sudden severe headache",
+            "Sudden weakness on one side of body",
+            "Sudden numbness in face, arm, or leg",
+            "Sudden confusion or difficulty speaking",
+            "Sudden vision loss in one or both eyes",
+            "Sudden difficulty walking or loss of balance",
+            "Slurred speech",
+            "Drooping of face on one side",
+            "Severe dizziness or vertigo",
+            "Loss of coordination",
+            "Transient vision blackout",
+            "Memory loss or confusion",
+        ],
+        "weights": {
+            "Sudden severe headache": 30,
+            "Sudden weakness on one side of body": 40,
+            "Sudden numbness in face, arm, or leg": 35,
+            "Sudden confusion or difficulty speaking": 38,
+            "Sudden vision loss in one or both eyes": 32,
+            "Sudden difficulty walking or loss of balance": 30,
+            "Slurred speech": 38,
+            "Drooping of face on one side": 40,
+            "Severe dizziness or vertigo": 18,
+            "Loss of coordination": 20,
+            "Transient vision blackout": 22,
+            "Memory loss or confusion": 15,
+        },
+        "emergency_threshold": 40,
+        "specialist": "Neurologist / Emergency Medicine",
+        "tests": "CT scan (non-contrast), MRI brain, carotid Doppler, coagulation panel, HbA1c",
+        "action": (
+            "CALL EMERGENCY SERVICES IMMEDIATELY if acute neurological symptoms. "
+            "Do not wait. Thrombolysis window is 4.5 hours from onset."
+        ),
+    },
+    "Renal / Kidney Complications (Diabetic Nephropathy)": {
+        "description": (
+            "Diabetic nephropathy affects 40% of diabetics. "
+            "Chronic hyperglycaemia damages glomeruli, leading to CKD and kidney failure."
+        ),
+        "symptoms": [
+            "Foamy or frothy urine (proteinuria)",
+            "Reduced urine output",
+            "Swelling in ankles, feet, or face (oedema)",
+            "Persistent fatigue and weakness",
+            "Loss of appetite",
+            "Nausea or vomiting (uraemia)",
+            "Itching or dry skin (uraemic pruritus)",
+            "Muscle cramps",
+            "Difficulty concentrating (uraemic encephalopathy)",
+            "High blood pressure that is difficult to control",
+            "Frequent urination at night (nocturia)",
+            "Pale or sallow skin",
+        ],
+        "weights": {
+            "Foamy or frothy urine (proteinuria)": 35,
+            "Reduced urine output": 30,
+            "Swelling in ankles, feet, or face (oedema)": 22,
+            "Persistent fatigue and weakness": 10,
+            "Loss of appetite": 12,
+            "Nausea or vomiting (uraemia)": 15,
+            "Itching or dry skin (uraemic pruritus)": 20,
+            "Muscle cramps": 10,
+            "Difficulty concentrating (uraemic encephalopathy)": 15,
+            "High blood pressure that is difficult to control": 18,
+            "Frequent urination at night (nocturia)": 12,
+            "Pale or sallow skin": 8,
+        },
+        "emergency_threshold": 70,
+        "specialist": "Nephrologist",
+        "tests": "Urine albumin-creatinine ratio, serum creatinine, eGFR, BUN, kidney ultrasound",
+        "action": (
+            "Nephrology referral. ACE inhibitor or ARB therapy. "
+            "Strict BP control (<130/80). Limit dietary protein and sodium. "
+            "Monitor eGFR every 3 months."
+        ),
+    },
+    "Diabetic Retinopathy (Vision Complications)": {
+        "description": (
+            "Diabetic retinopathy is the leading cause of blindness in working-age adults. "
+            "Hyperglycaemia damages retinal blood vessels, causing progressive vision loss."
+        ),
+        "symptoms": [
+            "Blurred or fluctuating vision",
+            "Dark spots or floaters in vision",
+            "Partial vision loss",
+            "Difficulty seeing at night",
+            "Colours appearing faded or washed out",
+            "Sudden complete vision loss in one eye",
+            "Flashes of light in vision",
+            "Distorted or wavy central vision",
+            "Difficulty reading or seeing fine detail",
+            "Eye pain or pressure",
+            "Double vision",
+            "Gradual loss of peripheral vision",
+        ],
+        "weights": {
+            "Blurred or fluctuating vision": 15,
+            "Dark spots or floaters in vision": 28,
+            "Partial vision loss": 35,
+            "Difficulty seeing at night": 18,
+            "Colours appearing faded or washed out": 15,
+            "Sudden complete vision loss in one eye": 45,
+            "Flashes of light in vision": 25,
+            "Distorted or wavy central vision": 30,
+            "Difficulty reading or seeing fine detail": 15,
+            "Eye pain or pressure": 20,
+            "Double vision": 18,
+            "Gradual loss of peripheral vision": 22,
+        },
+        "emergency_threshold": 45,
+        "specialist": "Ophthalmologist / Retinal Specialist",
+        "tests": "Dilated fundus exam, optical coherence tomography (OCT), fundus fluorescein angiography",
+        "action": (
+            "Annual dilated eye exam for all diabetics. "
+            "Optimise HbA1c, BP, and lipids. "
+            "Laser photocoagulation or anti-VEGF injections if proliferative."
+        ),
+    },
+}
+
+_EMERGENCY_TRIGGERS: Dict[str, List[str]] = {
+    "HEART ATTACK": [
+        "Chest pain or pressure",
+        "Chest tightness or heaviness",
+        "Pain radiating to left arm or jaw",
+        "Unexplained sweating with chest discomfort",
+    ],
+    "STROKE": [
+        "Sudden weakness on one side of body",
+        "Sudden numbness in face, arm, or leg",
+        "Sudden confusion or difficulty speaking",
+        "Slurred speech",
+        "Drooping of face on one side",
+        "Sudden vision loss in one or both eyes",
+        "Sudden difficulty walking or loss of balance",
+    ],
+    "DIABETIC KETOACIDOSIS (DKA)": [
+        "Deep laboured breathing (Kussmaul breathing)",
+        "Fruity / acetone breath",
+        "Confusion or altered consciousness",
+    ],
+    "SEVERE HYPOGLYCAEMIC CRISIS": [
+        "Confusion or altered consciousness",
+    ],
+    "SUDDEN VISION LOSS": [
+        "Sudden complete vision loss in one eye",
+    ],
+}
+
+
+def assess_complication_risks(
+    symptoms: List[str],
+    resolved_symptoms: List[str],
+    report_context: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """
+    Assess risk level for each of the four diabetes-driven complication domains.
+    Returns complications list, emergency_alert, overall_complication_risk,
+    and highest_risk_complication.
+    """
+    all_symptoms_set = set(resolved_symptoms)
+
+    # Step 1 — emergency trigger check
+    emergencies_detected = []
+    for emergency_name, trigger_list in _EMERGENCY_TRIGGERS.items():
+        for trigger in trigger_list:
+            if (trigger in all_symptoms_set or
+                    any(trigger.lower() in s.lower() for s in symptoms)):
+                emergencies_detected.append(emergency_name)
+                break
+
+    is_emergency = len(emergencies_detected) > 0
+    emergency_alert = {
+        "is_emergency": is_emergency,
+        "emergencies_detected": list(dict.fromkeys(emergencies_detected)),
+        "message": (
+            "CRITICAL EMERGENCY DETECTED — " +
+            " AND ".join(dict.fromkeys(emergencies_detected)) +
+            " symptoms present. Call emergency services immediately (112 / 108)."
+            if is_emergency
+            else "No acute emergency symptoms detected."
+        ),
+    }
+
+    # Step 2 — lab amplifiers
+    lab_amplifiers: Dict[str, int] = {}
+    if report_context:
+        params = report_context.get("parameters", {})
+        if params.get("blood_pressure", {}).get("status") == "High":
+            lab_amplifiers["Cardiovascular Risk (Heart Attack / CAD)"] = 15
+            lab_amplifiers["Cerebrovascular Risk (Stroke / Brain Hemorrhage)"] = 15
+        if params.get("creatinine", {}).get("status") == "High":
+            lab_amplifiers["Renal / Kidney Complications (Diabetic Nephropathy)"] = 20
+        hba1c_val = params.get("hba1c", {})
+        if isinstance(hba1c_val, dict) and float(hba1c_val.get("value", 0) or 0) > 8.0:
+            lab_amplifiers["Diabetic Retinopathy (Vision Complications)"] = 10
+            lab_amplifiers["Renal / Kidney Complications (Diabetic Nephropathy)"] = 10
+
+    # Step 3 — score each domain
+    complications = []
+    for comp_name, profile in _COMPLICATION_PROFILES.items():
+        score = 0
+        matched = []
+        for symptom in profile["symptoms"]:
+            symptom_lower = symptom.lower()
+            if symptom in all_symptoms_set:
+                score += profile["weights"][symptom]
+                matched.append(symptom)
+                continue
+            for raw in symptoms:
+                if (symptom_lower in raw.lower() or raw.lower() in symptom_lower or
+                        any(w in raw.lower() for w in symptom_lower.split() if len(w) > 4)):
+                    if symptom not in matched:
+                        score += profile["weights"][symptom]
+                        matched.append(symptom)
+                    break
+
+        score = min(score + lab_amplifiers.get(comp_name, 0), 100)
+
+        if score >= profile["emergency_threshold"]:
+            risk_level = "Critical"
+        elif score >= 35:
+            risk_level = "High"
+        elif score >= 15:
+            risk_level = "Moderate"
+        else:
+            risk_level = "Low"
+
+        complications.append({
+            "name": comp_name,
+            "risk_level": risk_level,
+            "score": score,
+            "matched_symptoms": matched,
+            "description": profile["description"],
+            "specialist": profile["specialist"],
+            "tests": profile["tests"],
+            "action": profile["action"],
+        })
+
+    complications.sort(key=lambda x: x["score"], reverse=True)
+    level_order = {"Critical": 4, "High": 3, "Moderate": 2, "Low": 1}
+    overall = max(complications, key=lambda x: level_order.get(x["risk_level"], 0))
+
+    return {
+        "complications": complications,
+        "emergency_alert": emergency_alert,
+        "overall_complication_risk": overall["risk_level"],
+        "highest_risk_complication": overall["name"],
+    }
+
+
+def _format_complication_summary(complication_result: Dict) -> str:
+    """Format complication risks as a string for LLM prompt injection."""
+    if not complication_result:
+        return "No complication assessment available."
+    alert = complication_result.get("emergency_alert", {})
+    lines = []
+    if alert.get("is_emergency"):
+        lines.append(f"EMERGENCY ALERT: {alert.get('message', '')}")
+    lines.append(f"Overall complication risk: {complication_result.get('overall_complication_risk', 'Unknown')}")
+    lines.append(f"Highest risk: {complication_result.get('highest_risk_complication', 'None')}")
+    for comp in complication_result.get("complications", []):
+        if comp["risk_level"] != "Low" or comp["matched_symptoms"]:
+            lines.append(f"  {comp['name']}: {comp['risk_level']} (score {comp['score']}/100)")
+            if comp["matched_symptoms"]:
+                lines.append(f"    Matched: {', '.join(comp['matched_symptoms'][:3])}")
+    return "\n".join(lines) if lines else "All complication risks: Low"
+
+
+def _rule_based_complication_section(complication_result: Dict) -> str:
+    """Build complication section for rule-based clinical note."""
+    if not complication_result:
+        return ""
+    lines = []
+    alert = complication_result.get("emergency_alert", {})
+    if alert.get("is_emergency"):
+        lines.append("")
+        lines.append("EMERGENCY ALERT")
+        for em in alert.get("emergencies_detected", []):
+            lines.append(f"  ⚠️  {em} symptoms detected — call emergency services immediately (112 / 108).")
+    non_low = [c for c in complication_result.get("complications", []) if c["risk_level"] != "Low"]
+    if non_low:
+        lines.append("")
+        lines.append("COMPLICATION RISKS IDENTIFIED:")
+        for comp in non_low:
+            icon = {"Critical": "🚨", "High": "⚠️", "Moderate": "🔶"}.get(comp["risk_level"], "")
+            lines.append(f"  {icon} {comp['name']}: {comp['risk_level']} risk (score {comp['score']}/100)")
+            if comp["matched_symptoms"]:
+                lines.append(f"     Symptoms: {', '.join(comp['matched_symptoms'])}")
+            lines.append(f"     Action:   {comp['action'][:120]}...")
+    else:
+        lines.append("")
+        lines.append("COMPLICATION RISKS: All four domains assessed as Low risk based on current symptoms.")
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 2 — SEMANTIC SYMPTOM MATCHING ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Medical synonym dictionary — maps patient lay language to canonical medical terms.
-# This is what makes "always thirsty" match "Polydipsia (excessive thirst)".
-# Each entry: lay term or phrase → expanded medical vocabulary string.
 MEDICAL_SYNONYMS: Dict[str, str] = {
-    # Hyperglycemia / thirst / urination
+    # Hyperglycemia
     "thirsty": "thirst polydipsia excessive thirst drinking lots water",
     "always thirsty": "thirst polydipsia excessive thirst drinking lots water",
     "drinking lots": "thirst polydipsia excessive thirst drinking lots water",
@@ -249,7 +635,6 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "fruity breath": "fruity acetone breath ketones ketoacidosis",
     "dry mouth": "dry mouth thirst",
     "headache": "headaches head pain",
-
     # Hypoglycemia
     "shaking": "shakiness trembling tremor hypoglycemia",
     "shaky": "shakiness trembling tremor hypoglycemia",
@@ -269,8 +654,7 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "weak": "weakness feeling faint low energy",
     "nightmares": "nightmares night sweats nocturnal hypoglycemia",
     "night sweats": "nightmares night sweats nocturnal",
-
-    # Insulin resistance / pre-diabetes
+    # Pre-diabetes
     "belly fat": "central obesity abdominal fat visceral",
     "stomach fat": "central obesity abdominal fat visceral",
     "potbelly": "central obesity abdominal fat",
@@ -286,7 +670,6 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "craving sugar": "cravings sweets carbohydrates sugar",
     "high blood pressure": "elevated blood pressure hypertension",
     "skin tags": "skin tags acrochordon insulin resistance",
-
     # Type 1 / DKA
     "sudden thirst": "rapid onset thirst urination acute",
     "rapid thirst": "rapid onset thirst urination acute",
@@ -296,7 +679,6 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "stomach pain": "abdominal pain gastrointestinal",
     "extreme tiredness": "extreme fatigue lethargy",
     "passing out": "confusion altered consciousness syncope",
-
     # Neuropathy
     "tingling": "tingling numbness neuropathy feet hands peripheral",
     "numb feet": "numbness tingling neuropathy feet",
@@ -308,8 +690,7 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "foot ulcer": "foot ulcers sores not healing diabetic foot",
     "sore on foot": "foot ulcers sores not healing diabetic foot",
     "weak legs": "muscle weakness feet legs",
-
-    # Autonomic neuropathy
+    # Autonomic
     "dizzy standing up": "postural hypotension dizziness standing orthostatic",
     "dizzy when I stand": "postural hypotension dizziness standing orthostatic",
     "bloating": "gastroparesis early satiety bloating nausea",
@@ -319,40 +700,63 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "sweating problems": "excessive reduced sweating autonomic",
     "fast heartbeat": "resting tachycardia rapid heart rate",
     "no hypoglycemia warning": "hypoglycemia unawareness autonomic neuropathy",
+    # Cardiovascular
+    "chest pain": "chest pain pressure tightness angina cardiac heart",
+    "chest tightness": "chest tightness heaviness pressure cardiac",
+    "chest pressure": "chest pain pressure tightness cardiac angina",
+    "arm pain": "pain radiating left arm jaw cardiac heart attack",
+    "jaw pain": "pain radiating left arm jaw cardiac heart attack",
+    "breathless": "shortness breath dyspnoea exertion cardiac respiratory",
+    "cant breathe": "shortness breath dyspnoea cardiac respiratory",
+    "swollen legs": "swelling legs ankles oedema cardiac renal",
+    "swollen ankles": "swelling ankles feet oedema cardiac renal",
+    "irregular heartbeat": "rapid irregular heartbeat palpitations arrhythmia cardiac",
+    # Stroke
+    "face drooping": "drooping face one side stroke facial palsy",
+    "face droop": "drooping face one side stroke facial palsy",
+    "slurred speech": "slurred speech dysarthria stroke cerebrovascular",
+    "cant speak": "sudden confusion difficulty speaking stroke aphasia",
+    "one side weak": "sudden weakness one side body stroke hemiplegia",
+    "sudden headache": "sudden severe headache stroke brain hemorrhage",
+    "worst headache": "sudden severe headache stroke brain hemorrhage thunderclap",
+    "cant walk": "sudden difficulty walking loss balance stroke",
+    "lost balance": "sudden difficulty walking loss balance stroke coordination",
+    # Renal
+    "foamy urine": "foamy frothy urine proteinuria nephropathy kidney",
+    "frothy urine": "foamy frothy urine proteinuria nephropathy kidney",
+    "swollen face": "swelling ankles feet face oedema renal cardiac",
+    "not urinating": "reduced urine output oliguria kidney renal failure",
+    "itchy skin": "itching dry skin uraemic pruritus kidney nephropathy",
+    "muscle cramps": "muscle cramps uraemia kidney nephropathy",
+    # Retinopathy
+    "floaters": "dark spots floaters vision retinopathy eye",
+    "spots in vision": "dark spots floaters vision retinopathy eye",
+    "flashing lights": "flashes light vision retinopathy eye",
+    "cant see": "sudden vision loss eye retinopathy stroke",
+    "vision gone": "sudden complete vision loss eye emergency retinopathy",
+    "wavy vision": "distorted wavy central vision macular retinopathy",
+    "faded colours": "colours faded washed out vision retinopathy",
+    "night blindness": "difficulty seeing night dark retinopathy eye",
 }
 
-# All canonical symptom strings from both maps — the "vocabulary" of the matcher
 _ALL_CANONICAL: List[str] = list(dict.fromkeys(
     s for symptoms in _CONDITION_SYMPTOM_MAP.values() for s in symptoms
 ))
 
 
 class SemanticSymptomMatcher:
-    """
-    Matches free-text patient input to canonical symptom strings using:
-    1. Exact match check (fastest, highest confidence)
-    2. Medical synonym expansion → TF-IDF character n-gram cosine similarity
-
-    No model downloads required. Works fully offline.
-    """
-
     def __init__(self, threshold: float = 0.35):
         self.threshold = threshold
         self._canonical = _ALL_CANONICAL
         self._expanded_canonical = [self._expand(s) for s in self._canonical]
         self._vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(3, 5),
-            min_df=1,
-            sublinear_tf=True,
+            analyzer="char_wb", ngram_range=(3, 5), min_df=1, sublinear_tf=True,
         )
-        # Fit vectorizer on all canonical texts
         self._vectorizer.fit(self._expanded_canonical)
         self._canonical_matrix = self._vectorizer.transform(self._expanded_canonical)
         logger.info(f"SemanticSymptomMatcher ready — {len(self._canonical)} canonical symptoms")
 
     def _expand(self, text: str) -> str:
-        """Expand text with medical synonyms to improve matching coverage."""
         text_lower = text.lower()
         expanded = text_lower
         for key, expansion in MEDICAL_SYNONYMS.items():
@@ -361,50 +765,24 @@ class SemanticSymptomMatcher:
         return expanded
 
     def match(self, user_input: str) -> Tuple[Optional[str], float]:
-        """
-        Match one user input string to the best canonical symptom.
-
-        Returns:
-            (canonical_symptom, similarity_score) or (None, 0.0) if below threshold
-        """
-        # Step 1: exact match — if the user selected a checkbox, it already is canonical
         if user_input in self._canonical:
             return user_input, 1.0
-
-        # Step 2: case-insensitive exact match
         user_lower = user_input.lower().strip()
         for c in self._canonical:
             if c.lower() == user_lower:
                 return c, 1.0
-
-        # Step 3: TF-IDF semantic match on expanded text
         expanded = self._expand(user_input)
         user_vec = self._vectorizer.transform([expanded])
         from sklearn.metrics.pairwise import cosine_similarity
         sims = cosine_similarity(user_vec, self._canonical_matrix).flatten()
         best_idx = int(np.argmax(sims))
         best_score = float(sims[best_idx])
-
         if best_score >= self.threshold:
             return self._canonical[best_idx], best_score
         return None, best_score
 
     def match_all(self, user_inputs: List[str]) -> Dict[str, Any]:
-        """
-        Match a list of user inputs.
-
-        Returns:
-            {
-              "matched":   [(user_input, canonical, score), ...],
-              "unmatched": [(user_input, best_score), ...],
-              "canonical_list": [canonical strings that matched, deduplicated]
-            }
-        """
-        matched = []
-        unmatched = []
-        seen_canonical = set()
-        canonical_list = []
-
+        matched, unmatched, seen_canonical, canonical_list = [], [], set(), []
         for user_input in user_inputs:
             canonical, score = self.match(user_input)
             if canonical and canonical not in seen_canonical:
@@ -412,35 +790,18 @@ class SemanticSymptomMatcher:
                 seen_canonical.add(canonical)
                 canonical_list.append(canonical)
             elif canonical and canonical in seen_canonical:
-                # Already matched — still record as matched, just don't duplicate
                 matched.append((user_input, canonical, score))
             else:
                 unmatched.append((user_input, score))
-
-        return {
-            "matched":        matched,
-            "unmatched":      unmatched,
-            "canonical_list": canonical_list,
-        }
+        return {"matched": matched, "unmatched": unmatched, "canonical_list": canonical_list}
 
 
-# Module-level singleton — created once, reused for all calls
 _matcher = SemanticSymptomMatcher(threshold=0.35)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 3 — PIMA INDIANS DIABETES DATASET + LOGISTIC REGRESSION
 # ══════════════════════════════════════════════════════════════════════════════
-
-# Pima Indians Diabetes Dataset (262 rows)
-# Source: UCI Machine Learning Repository (public domain)
-# Citation: Smith, J.W. et al. (1988). Using the ADAP learning algorithm to
-#           forecast the onset of diabetes mellitus. Proceedings of the Symposium
-#           on Computer Applications in Medical Care, pp. 261-265.
-# 768 female patients of Pima Indian heritage, aged >= 21.
-# Features: pregnancies, glucose, blood_pressure, skin_thickness, insulin,
-#           bmi, diabetes_pedigree_function, age
-# Target: outcome (1 = diabetes, 0 = no diabetes)
 
 _PIMA_DATA = [
     [6,148,72,35,0,33.6,0.627,50,1],[1,85,66,29,0,26.6,0.351,31,0],
@@ -514,7 +875,6 @@ _PIMA_COLS = [
     "pregnancies", "glucose", "blood_pressure", "skin_thickness",
     "insulin", "bmi", "pedigree", "age", "outcome",
 ]
-
 _PIMA_FEATURE_COLS = [
     "pregnancies", "glucose", "blood_pressure", "skin_thickness",
     "insulin", "bmi", "pedigree", "age",
@@ -522,16 +882,6 @@ _PIMA_FEATURE_COLS = [
 
 
 class PimaModel:
-    """
-    Logistic Regression trained on the Pima Indians Diabetes Dataset.
-
-    Predicts diabetes probability from: pregnancies, glucose, blood_pressure,
-    skin_thickness, insulin, bmi, pedigree_function, age.
-
-    Accuracy metrics are computed via 5-fold stratified cross-validation and
-    a held-out 20% test set. Results are stored in self.metrics.
-    """
-
     def __init__(self):
         self._model: Optional[LogisticRegression] = None
         self._scaler: Optional[StandardScaler] = None
@@ -543,31 +893,26 @@ class PimaModel:
         if os.path.exists(_DATASET_PATH):
             df = pd.read_csv(_DATASET_PATH)
         else:
-            logger.warning(
-                "Pima dataset not found at %s; using bundled inline dataset",
-                _DATASET_PATH,
-            )
+            logger.warning("Pima dataset CSV not found — using bundled inline data")
             df = pd.DataFrame(_PIMA_DATA, columns=_PIMA_COLS)
-        # Replace biologically impossible zeros with NaN, then impute with median
         for col in ["glucose", "blood_pressure", "skin_thickness", "insulin", "bmi"]:
             df[col] = df[col].replace(0, np.nan)
         df = df.fillna(df.median(numeric_only=True))
         return df
 
     def _train(self):
-        """Train model and compute all accuracy metrics."""
         if _MODEL_CACHE_PATH.exists():
             try:
                 with open(_MODEL_CACHE_PATH, "rb") as f:
                     saved = pickle.load(f)
-                self._model   = saved["model"]
-                self._scaler  = saved["scaler"]
-                self.metrics  = saved["metrics"]
+                self._model = saved["model"]
+                self._scaler = saved["scaler"]
+                self.metrics = saved["metrics"]
                 self._trained = True
                 logger.info("PimaModel loaded from cache")
                 return
             except Exception:
-                pass  # re-train if cache is corrupt
+                pass
 
         logger.info("PimaModel: training on Pima Indians Diabetes Dataset...")
         df = self._build_dataframe()
@@ -577,7 +922,6 @@ class PimaModel:
         self._scaler = StandardScaler()
         X_scaled = self._scaler.fit_transform(X)
 
-        # Train / test split (80/20, stratified)
         X_train, X_test, y_train, y_test = train_test_split(
             X_scaled, y, test_size=0.20, random_state=42, stratify=y
         )
@@ -585,115 +929,74 @@ class PimaModel:
         self._model = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
         self._model.fit(X_train, y_train)
 
-        # Hold-out test metrics
         y_pred = self._model.predict(X_test)
         y_prob = self._model.predict_proba(X_test)[:, 1]
-        cm     = confusion_matrix(y_test, y_pred)
+        cm = confusion_matrix(y_test, y_pred)
 
-        # 5-fold cross-validation
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         cv_acc = cross_val_score(self._model, X_scaled, y, cv=cv, scoring="accuracy")
         cv_f1  = cross_val_score(self._model, X_scaled, y, cv=cv, scoring="f1")
         cv_auc = cross_val_score(self._model, X_scaled, y, cv=cv, scoring="roc_auc")
 
-        # Feature importance from logistic regression coefficients
         feature_importance = sorted(
             zip(_PIMA_FEATURE_COLS, self._model.coef_[0].tolist()),
             key=lambda x: abs(x[1]), reverse=True
         )
 
         self.metrics = {
-            # Dataset info
-            "dataset":          "Pima Indians Diabetes Dataset (UCI ML Repository)",
+            "dataset": "Pima Indians Diabetes Dataset (UCI ML Repository)",
             "dataset_citation": "Smith et al. (1988), ADAP algorithm, SCAMC pp.261-265",
-            "total_samples":    len(df),
+            "total_samples": len(df),
             "diabetic_samples": int(y.sum()),
             "non_diabetic_samples": int((y == 0).sum()),
-            "train_samples":    len(X_train),
-            "test_samples":     len(X_test),
-            "features_used":    _PIMA_FEATURE_COLS,
-
-            # Hold-out test metrics
-            "test_accuracy":    round(float(accuracy_score(y_test, y_pred)), 4),
-            "test_precision":   round(float(precision_score(y_test, y_pred)), 4),
-            "test_recall":      round(float(recall_score(y_test, y_pred)), 4),
-            "test_f1":          round(float(f1_score(y_test, y_pred)), 4),
-            "test_roc_auc":     round(float(roc_auc_score(y_test, y_prob)), 4),
+            "train_samples": len(X_train),
+            "test_samples": len(X_test),
+            "features_used": _PIMA_FEATURE_COLS,
+            "test_accuracy": round(float(accuracy_score(y_test, y_pred)), 4),
+            "test_precision": round(float(precision_score(y_test, y_pred)), 4),
+            "test_recall": round(float(recall_score(y_test, y_pred)), 4),
+            "test_f1": round(float(f1_score(y_test, y_pred)), 4),
+            "test_roc_auc": round(float(roc_auc_score(y_test, y_prob)), 4),
             "confusion_matrix": {
-                "true_negative":  int(cm[0, 0]),
+                "true_negative": int(cm[0, 0]),
                 "false_positive": int(cm[0, 1]),
                 "false_negative": int(cm[1, 0]),
-                "true_positive":  int(cm[1, 1]),
+                "true_positive": int(cm[1, 1]),
             },
-
-            # Cross-validation metrics (more reliable)
-            "cv_folds":         5,
-            "cv_accuracy":      round(float(cv_acc.mean()), 4),
-            "cv_accuracy_std":  round(float(cv_acc.std()), 4),
-            "cv_f1":            round(float(cv_f1.mean()), 4),
-            "cv_f1_std":        round(float(cv_f1.std()), 4),
-            "cv_roc_auc":       round(float(cv_auc.mean()), 4),
-            "cv_roc_auc_std":   round(float(cv_auc.std()), 4),
-
-            # Feature importance
+            "cv_folds": 5,
+            "cv_accuracy": round(float(cv_acc.mean()), 4),
+            "cv_accuracy_std": round(float(cv_acc.std()), 4),
+            "cv_f1": round(float(cv_f1.mean()), 4),
+            "cv_f1_std": round(float(cv_f1.std()), 4),
+            "cv_roc_auc": round(float(cv_auc.mean()), 4),
+            "cv_roc_auc_std": round(float(cv_auc.std()), 4),
             "feature_importance": [
                 {"feature": f, "coefficient": round(c, 4)}
                 for f, c in feature_importance
             ],
-
-            # Classification report
             "classification_report": classification_report(
                 y_test, y_pred, target_names=["No Diabetes", "Diabetes"]
             ),
         }
 
         self._trained = True
-
-        # Cache to disk
         try:
             with open(_MODEL_CACHE_PATH, "wb") as f:
-                pickle.dump({
-                    "model": self._model,
-                    "scaler": self._scaler,
-                    "metrics": self.metrics,
-                }, f)
+                pickle.dump({"model": self._model, "scaler": self._scaler, "metrics": self.metrics}, f)
             logger.info("PimaModel cached to disk")
         except Exception as e:
             logger.warning(f"Could not cache model: {e}")
 
         logger.info(
-            f"PimaModel trained — "
-            f"CV Accuracy: {self.metrics['cv_accuracy']:.2%} ± {self.metrics['cv_accuracy_std']:.2%} | "
-            f"ROC-AUC: {self.metrics['cv_roc_auc']:.4f}"
+            f"PimaModel trained — CV Accuracy: {self.metrics['cv_accuracy']:.2%} "
+            f"± {self.metrics['cv_accuracy_std']:.2%} | ROC-AUC: {self.metrics['cv_roc_auc']:.4f}"
         )
 
     def predict(self, lab_values: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Predict diabetes probability for a single patient.
-
-        Args:
-            lab_values: dict with any subset of:
-                pregnancies, glucose, blood_pressure, skin_thickness,
-                insulin, bmi, pedigree, age
-
-        Returns:
-            {
-              "probability":  float (0-1),
-              "prediction":   "Diabetes" | "No Diabetes",
-              "confidence":   "High" | "Moderate" | "Low",
-              "risk_level":   "Critical" | "High" | "Moderate" | "Low",
-              "model":        "LogisticRegression (Pima Dataset)"
-            }
-        """
         if not self._trained or self._model is None:
             return {"error": "Model not trained", "probability": None}
 
-        # Build feature vector — use 0 for missing features (imputed by median during training)
-        df_input = pd.DataFrame([{
-            col: lab_values.get(col, 0) for col in _PIMA_FEATURE_COLS
-        }])
-
-        # Replace impossible zeros with dataset medians for the 5 imputed columns
+        df_input = pd.DataFrame([{col: lab_values.get(col, 0) for col in _PIMA_FEATURE_COLS}])
         df_source = self._build_dataframe()
         for col in ["glucose", "blood_pressure", "skin_thickness", "insulin", "bmi"]:
             if df_input[col].iloc[0] == 0:
@@ -704,144 +1007,121 @@ class PimaModel:
         prediction = "Diabetes" if prob >= 0.50 else "No Diabetes"
 
         if prob >= 0.80:
-            confidence, risk_level = "High",     "Critical"
+            confidence, risk_level = "High", "Critical"
         elif prob >= 0.65:
-            confidence, risk_level = "High",     "High"
+            confidence, risk_level = "High", "High"
         elif prob >= 0.40:
             confidence, risk_level = "Moderate", "Moderate"
         else:
-            confidence, risk_level = "High",     "Low"
+            confidence, risk_level = "High", "Low"
 
         return {
-            "probability":  round(prob, 4),
+            "probability": round(prob, 4),
             "probability_pct": f"{prob * 100:.1f}%",
-            "prediction":   prediction,
-            "confidence":   confidence,
-            "risk_level":   risk_level,
-            "model":        "LogisticRegression (Pima Indians Diabetes Dataset)",
+            "prediction": prediction,
+            "confidence": confidence,
+            "risk_level": risk_level,
+            "model": "LogisticRegression (Pima Indians Diabetes Dataset)",
         }
 
     def get_accuracy_report(self) -> str:
-        """Return a formatted human-readable accuracy report."""
         m = self.metrics
         cm = m["confusion_matrix"]
         lines = [
-            "=" * 60,
-            "PIMA MODEL — ACCURACY REPORT",
-            "=" * 60,
+            "=" * 60, "PIMA MODEL — ACCURACY REPORT", "=" * 60,
             f"Dataset:    {m['dataset']}",
             f"Citation:   {m['dataset_citation']}",
-            f"Samples:    {m['total_samples']} total "
-            f"({m['diabetic_samples']} diabetic, {m['non_diabetic_samples']} non-diabetic)",
+            f"Samples:    {m['total_samples']} total ({m['diabetic_samples']} diabetic, {m['non_diabetic_samples']} non-diabetic)",
             f"Features:   {', '.join(m['features_used'])}",
-            "",
-            "── HOLD-OUT TEST SET (20%) ──────────────────────────",
+            "", "── HOLD-OUT TEST SET (20%) ──────────────────────────",
             f"Accuracy:   {m['test_accuracy']:.4f}  ({m['test_accuracy']*100:.2f}%)",
             f"Precision:  {m['test_precision']:.4f}",
             f"Recall:     {m['test_recall']:.4f}",
             f"F1 Score:   {m['test_f1']:.4f}",
             f"ROC-AUC:    {m['test_roc_auc']:.4f}",
-            "",
-            "Confusion Matrix:",
-            f"  True Negative  (no diabetes, correct): {cm['true_negative']}",
-            f"  False Positive (no diabetes, wrong):   {cm['false_positive']}",
-            f"  False Negative (diabetes, missed):     {cm['false_negative']}",
-            f"  True Positive  (diabetes, correct):    {cm['true_positive']}",
-            "",
-            "── 5-FOLD CROSS-VALIDATION ──────────────────────────",
+            "", "Confusion Matrix:",
+            f"  True Negative:  {cm['true_negative']}",
+            f"  False Positive: {cm['false_positive']}",
+            f"  False Negative: {cm['false_negative']}",
+            f"  True Positive:  {cm['true_positive']}",
+            "", "── 5-FOLD CROSS-VALIDATION ──────────────────────────",
             f"CV Accuracy: {m['cv_accuracy']:.4f} ± {m['cv_accuracy_std']:.4f}",
             f"CV F1:       {m['cv_f1']:.4f} ± {m['cv_f1_std']:.4f}",
             f"CV ROC-AUC:  {m['cv_roc_auc']:.4f} ± {m['cv_roc_auc_std']:.4f}",
-            "",
-            "── FEATURE IMPORTANCE (by coefficient magnitude) ────",
+            "", "── FEATURE IMPORTANCE ────────────────────────────────",
         ]
         for fi in m["feature_importance"]:
             bar = "█" * int(abs(fi["coefficient"]) * 10)
             lines.append(f"  {fi['feature']:20s} {fi['coefficient']:+.4f}  {bar}")
-        lines.append("")
-        lines.append("── CLASSIFICATION REPORT ────────────────────────────")
-        lines.append(m["classification_report"])
-        lines.append("=" * 60)
+        lines += ["", "── CLASSIFICATION REPORT ────────────────────────────",
+                  m["classification_report"], "=" * 60]
         return "\n".join(lines)
 
 
-# Module-level singleton — trained once, reused for all calls
 _pima_model = PimaModel()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — LANGCHAIN TOOL (now uses semantic matching)
+#  SECTION 4 — LANGCHAIN TOOL
 # ══════════════════════════════════════════════════════════════════════════════
 
 @tool
 def map_symptoms_to_conditions(symptoms: List[str]) -> Dict[str, Any]:
-    """
-    Map patient symptoms to ranked diabetes condition hypotheses.
-
-    Accepts BOTH canonical symptom strings (from checkboxes) AND
-    free-text paraphrases (e.g. "always thirsty", "feet tingling").
-    Semantic matching via TF-IDF + medical synonym expansion.
-
-    Returns condition_hypotheses (sorted by match_count), top_hypothesis,
-    total_symptoms_checked, unmatched_symptoms, and semantic_matches.
-    """
+    """Map patient symptoms to ranked diabetes condition hypotheses."""
     if not symptoms:
         return {
-            "condition_hypotheses":   [],
-            "top_hypothesis":         "No symptoms provided",
+            "condition_hypotheses": [],
+            "top_hypothesis": "No symptoms provided",
             "total_symptoms_checked": 0,
-            "unmatched_symptoms":     [],
-            "semantic_matches":       [],
+            "unmatched_symptoms": [],
+            "semantic_matches": [],
         }
 
-    # Step 1: semantic resolution — convert all inputs to canonical form
-    match_result    = _matcher.match_all(symptoms)
-    canonical_list  = match_result["canonical_list"]
-    semantic_log    = [
+    match_result = _matcher.match_all(symptoms)
+    canonical_list = match_result["canonical_list"]
+    semantic_log = [
         {"input": m[0], "matched_to": m[1], "score": round(m[2], 3)}
         for m in match_result["matched"]
     ]
     unmatched_inputs = [u[0] for u in match_result["unmatched"]]
 
-    # Step 2: condition scoring on resolved canonical symptoms
     scored: Dict[str, Dict] = {}
     all_mapped: set = set()
-
     for condition, cond_syms in _CONDITION_SYMPTOM_MAP.items():
         matched = [s for s in canonical_list if s in cond_syms]
         if matched:
             scored[condition] = {
                 "matched_symptoms": matched,
-                "match_count":      len(matched),
-                "coverage":         f"{len(matched)}/{len(cond_syms)}",
+                "match_count": len(matched),
+                "coverage": f"{len(matched)}/{len(cond_syms)}",
             }
             all_mapped.update(matched)
 
-    ranked    = sorted(scored.items(), key=lambda x: x[1]["match_count"], reverse=True)
+    ranked = sorted(scored.items(), key=lambda x: x[1]["match_count"], reverse=True)
     unmatched = [s for s in canonical_list if s not in all_mapped] + unmatched_inputs
 
     return {
-        "condition_hypotheses":   [{"condition": k, **v} for k, v in ranked],
-        "top_hypothesis":         ranked[0][0] if ranked else "No condition mapped",
+        "condition_hypotheses": [{"condition": k, **v} for k, v in ranked],
+        "top_hypothesis": ranked[0][0] if ranked else "No condition mapped",
         "total_symptoms_checked": len(symptoms),
-        "unmatched_symptoms":     unmatched,
-        "semantic_matches":       semantic_log,
+        "unmatched_symptoms": unmatched,
+        "semantic_matches": semantic_log,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — CONTEXT BUILDER (unchanged from v2)
+#  SECTION 5 — CONTEXT BUILDER (no risk_context)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_context(
     report_context: Optional[Dict] = None,
-    risk_context:   Optional[Dict] = None,
     manual_text:    Optional[str]  = None,
     pima_result:    Optional[Dict] = None,
 ) -> str:
     """
-    Normalise upstream agent outputs, Pima prediction, and free text
-    into a single prompt string for Qwen 2.5 3B.
+    Normalise upstream data into a single prompt string for Qwen 2.5 3B.
+    Sources: report_context (ReportAnalyzerAgent), manual_text, pima_result.
+    Risk prediction context removed — no longer reads from RiskPredictorAgent.
     """
     parts: List[str] = []
 
@@ -871,19 +1151,6 @@ def build_context(
         if abnormal:
             parts.append(f"  Abnormal Parameters: {', '.join(p.upper() for p in abnormal)}")
 
-    if risk_context:
-        parts.append("=== RISK PREDICTION (from RiskPredictorAgent) ===")
-        for key, label in [
-            ("risk_tier", "Risk Tier"), ("risk_score", "Risk Score"),
-            ("risk_level", "Risk Level"), ("risk_probability", "Risk Probability"),
-        ]:
-            if risk_context.get(key):
-                parts.append(f"  {label}: {risk_context[key]}")
-        if risk_context.get("ada_classifications"):
-            parts.append(f"  ADA: {'; '.join(risk_context['ada_classifications'])}")
-        if risk_context.get("recommended_action"):
-            parts.append(f"  Recommended Action: {risk_context['recommended_action']}")
-
     if manual_text and manual_text.strip():
         parts.append("=== ADDITIONAL PATIENT NOTES ===")
         parts.append(f"  {manual_text.strip()}")
@@ -892,7 +1159,7 @@ def build_context(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6 — LLM COMPONENTS 
+#  SECTION 6 — LLM COMPONENTS (Qwen 2.5 3B)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _clean_llm_output(text: str) -> str:
@@ -905,10 +1172,11 @@ SYMPTOM_REASONING_PROMPT = PromptTemplate(
     input_variables=[
         "upstream_context", "symptom_map", "symptoms_text",
         "top_hypothesis", "unmatched_symptoms", "pima_probability",
+        "complication_summary",
     ],
-    template="""You are a specialist clinical decision-support system for Diabetes.
-Your role is ONLY diabetes symptom analysis and clinical reasoning.
-Lab validation and risk scoring have already been done by upstream agents — use their output as context.
+    template="""You are a specialist clinical decision-support system for Diabetes and its associated complications.
+Your role is diabetes symptom analysis, complication risk assessment, and clinical reasoning.
+Lab validation has already been done by the upstream agent — use its output as context.
 
 === UPSTREAM AGENT CONTEXT ===
 {upstream_context}
@@ -924,33 +1192,37 @@ Unmatched symptoms (not in any known diabetes pattern): {unmatched_symptoms}
 
 Pima dataset ML prediction: {pima_probability}
 
+=== COMPLICATION RISK ASSESSMENT ===
+{complication_summary}
+
 === YOUR TASK ===
-Write a focused diabetes symptom-analysis note. Use EXACTLY this structure, no more than 200 words total:
+Write a focused clinical note. Use EXACTLY this structure, no more than 250 words total:
 
 1. SYMPTOM INTERPRETATION: Which symptoms are most clinically significant for diabetes and why.
-2. CONDITION CORRELATION: How the symptoms align with the upstream lab/risk findings and ML prediction.
+2. CONDITION CORRELATION: How the symptoms align with the lab findings and ML prediction.
 3. PRIMARY HYPOTHESIS: Most likely diabetes type or condition based on the full picture.
-4. DIFFERENTIAL: 1-2 alternative diabetes conditions the unmatched or overlapping symptoms may suggest.
-5. CLINICAL RECOMMENDATION: Specific next steps — which specialist, which tests, which lifestyle or medication changes.
+4. COMPLICATION RISKS: Which secondary complications (cardiovascular, cerebrovascular, renal, retinopathy) are indicated. If emergency symptoms are present, state this explicitly and urgently.
+5. DIFFERENTIAL: 1-2 alternative conditions the unmatched or overlapping symptoms may suggest.
+6. CLINICAL RECOMMENDATION: Specific next steps — which specialists, which tests, which lifestyle or medication changes. Address both diabetes and any identified complications.
 
-Be concise and clinically precise. Do not repeat lab values verbatim -- refer to them by finding.
-Do not add AI disclaimers or suggest consulting a doctor generically -- give specific specialty referrals.
-Do not use markdown formatting, headers, or bullet symbols. Write in plain numbered sections only.""",
+Be concise and clinically precise. Do not repeat lab values verbatim.
+Do not add AI disclaimers or suggest consulting a doctor generically — give specific specialty referrals.
+Do not use markdown formatting, headers, or bullet symbols. Write in plain numbered sections only.
+If any emergency symptoms are present, begin the note with EMERGENCY ALERT before section 1.""",
 )
 
 
 def _build_chain():
     try:
-        resp      = requests.get(OLLAMA_TAGS, timeout=4)
+        resp = requests.get(OLLAMA_TAGS, timeout=4)
         available = [m["name"] for m in resp.json().get("models", [])]
-        model_id  = next(
+        model_id = next(
             (a for a in available if REASONING_MODEL["id"].split(":")[0] in a), None
         )
         if not model_id:
             logger.warning(f"Qwen 2.5 3B not found. Run: {REASONING_MODEL['pull_cmd']}")
             return None
-
-        llm   = Ollama(model=model_id, temperature=0.2, num_predict=1200)
+        llm = Ollama(model=model_id, temperature=0.2, num_predict=1200)
         chain = SYMPTOM_REASONING_PROMPT | llm | StrOutputParser()
         logger.info(f"SymptomAnalyzerAgent using: {model_id}")
         return chain
@@ -960,19 +1232,19 @@ def _build_chain():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 7 — RULE-BASED FALLBACK (unchanged from v2)
+#  SECTION 7 — RULE-BASED FALLBACK
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _rule_based_reasoning(
     symptom_map_result: Dict,
-    upstream_context:   str,
-    symptoms:           List[str],
-    pima_result:        Optional[Dict] = None,
+    upstream_context: str,
+    symptoms: List[str],
+    pima_result: Optional[Dict] = None,
 ) -> str:
-    hyps      = symptom_map_result.get("condition_hypotheses", [])
-    top       = symptom_map_result.get("top_hypothesis", "")
+    hyps = symptom_map_result.get("condition_hypotheses", [])
+    top = symptom_map_result.get("top_hypothesis", "")
     unmatched = symptom_map_result.get("unmatched_symptoms", [])
-    lines     = []
+    lines = []
 
     if not symptoms:
         lines.append("No symptoms were provided.")
@@ -985,14 +1257,6 @@ def _rule_based_reasoning(
     lines.append(f"SYMPTOM INTERPRETATION ({len(symptoms)} reported)")
     for s in symptoms:
         lines.append(f"  - {s}")
-
-    # Show semantic resolution if any free-text was matched
-    sem = symptom_map_result.get("semantic_matches", [])
-    free_text_matches = [m for m in sem if m["score"] < 1.0]
-    if free_text_matches:
-        lines.append("\nSemantic matches resolved:")
-        for m in free_text_matches:
-            lines.append(f"  '{m['input']}' → '{m['matched_to']}' (score {m['score']:.2f})")
 
     if hyps:
         lines.append(f"\nPRIMARY HYPOTHESIS: {top}")
@@ -1019,18 +1283,18 @@ def _rule_based_reasoning(
     if upstream_context and "No upstream context" not in upstream_context:
         lines.append("\nUPSTREAM CONTEXT SUMMARY:")
         for line in upstream_context.split("\n"):
-            if any(kw in line for kw in ["Flag", "Risk", "ADA", "Abnormal", "Probability"]):
+            if any(kw in line for kw in ["Flag", "ADA", "Abnormal", "Probability"]):
                 lines.append(f"  {line.strip()}")
 
     recs = {
-        "Type 2 Diabetes":                "Refer to Endocrinologist. Confirm with repeat HbA1c + OGTT. Initiate MNT and consider Metformin.",
-        "Type 1 Diabetes":                "Urgent referral to Endocrinologist. Check C-peptide, GAD antibodies, fasting insulin. Initiate insulin therapy.",
+        "Type 2 Diabetes": "Refer to Endocrinologist. Confirm with repeat HbA1c + OGTT. Initiate MNT and consider Metformin.",
+        "Type 1 Diabetes": "Urgent referral to Endocrinologist. Check C-peptide, GAD antibodies, fasting insulin. Initiate insulin therapy.",
         "Pre-diabetes / Insulin Resistance": "Lifestyle intervention program. Repeat HbA1c in 3 months. Screen for metabolic syndrome.",
-        "Gestational Diabetes":           "Refer to OB-GYN + Endocrinologist. OGTT immediately. Monitor fetal growth. Dietary modification first line.",
-        "Hypoglycemia":                   "Evaluate for reactive vs. fasting hypoglycemia. 72-hour fast test if indicated. Review current medications.",
-        "Diabetic Ketoacidosis (DKA)":    "EMERGENCY — immediate hospital admission. IV fluids, insulin drip, electrolyte correction. Monitor hourly.",
+        "Gestational Diabetes": "Refer to OB-GYN + Endocrinologist. OGTT immediately. Monitor fetal growth. Dietary modification first line.",
+        "Hypoglycemia": "Evaluate for reactive vs. fasting hypoglycemia. 72-hour fast test if indicated. Review current medications.",
+        "Diabetic Ketoacidosis (DKA)": "EMERGENCY — immediate hospital admission. IV fluids, insulin drip, electrolyte correction. Monitor hourly.",
         "Diabetic Peripheral Neuropathy": "Refer to Neurologist. Monofilament foot exam. Optimize glycemic control. Consider gabapentin or duloxetine.",
-        "Diabetic Autonomic Neuropathy":  "Refer to Neurologist + Gastroenterologist. Orthostatic BP measurement. HRV testing. Optimize glycemic control.",
+        "Diabetic Autonomic Neuropathy": "Refer to Neurologist + Gastroenterologist. Orthostatic BP measurement. HRV testing. Optimize glycemic control.",
     }
     lines.append(f"\nRECOMMENDATION: {recs.get(top, 'Refer to Endocrinologist for comprehensive diabetes evaluation.')}")
     return "\n".join(lines)
@@ -1044,68 +1308,69 @@ def analyze_symptoms(
     symptoms:       List[str],
     lab_values:     Optional[Dict[str, float]] = None,
     report_context: Optional[Dict] = None,
-    risk_context:   Optional[Dict] = None,
     manual_text:    Optional[str]  = None,
     use_llm:        bool           = True,
 ) -> Dict[str, Any]:
     """
-    Run the full diabetes symptom analysis pipeline (v3).
+    Run the full diabetes + complication symptom analysis pipeline.
 
     Args:
         symptoms:       Symptom strings — checkboxes OR free-text paraphrases.
-                        e.g. ["always thirsty", "feet tingling", "blurry eyes"]
         lab_values:     Optional lab dict for Pima ML prediction.
-                        Keys: pregnancies, glucose, blood_pressure, skin_thickness,
-                              insulin, bmi, pedigree, age
         report_context: Output dict from ReportAnalyzerAgent (optional).
-        risk_context:   Output dict from RiskPredictorAgent (optional).
         manual_text:    Free-text notes from user (optional).
         use_llm:        Set False to force rule-based mode.
+        Note:           risk_context removed — agent no longer depends on RiskPredictorAgent.
 
     Returns:
         {
-          "symptom_mapping":  { condition_hypotheses, top_hypothesis,
-                                unmatched_symptoms, semantic_matches },
-          "pima_prediction":  { probability, prediction, risk_level, ... },
-          "pima_metrics":     { accuracy, precision, recall, f1, roc_auc, ... },
-          "reasoning":        str,
-          "model_used":       "qwen2.5:3b" | "rule-based",
-          "input_summary":    { symptoms_count, sources_used, top_hypothesis },
+          "symptom_mapping":    { condition_hypotheses, top_hypothesis, ... },
+          "pima_prediction":    { probability, prediction, risk_level, ... },
+          "pima_metrics":       { accuracy, precision, recall, f1, roc_auc, ... },
+          "complication_risks": { complications, emergency_alert, overall_risk, ... },
+          "reasoning":          str,
+          "model_used":         "qwen2.5:3b" | "rule-based",
+          "input_summary":      { symptoms_count, sources_used, top_hypothesis,
+                                  emergency_alert, overall_complication_risk },
         }
     """
     # Step A — semantic symptom mapping
     symptom_map_result = map_symptoms_to_conditions.invoke({"symptoms": symptoms})
 
-    # Step B — Pima ML prediction (if lab values provided)
+    # Step B — Pima ML prediction
     pima_result: Optional[Dict] = None
     if lab_values:
         pima_result = _pima_model.predict(lab_values)
     elif report_context:
-        # Try to extract lab values from report_context automatically
         params = report_context.get("parameters", {})
         auto_labs: Dict[str, float] = {}
-        field_map = {
-            "glucose": "glucose", "bmi": "bmi", "age": "age",
-            "pregnancies": "pregnancies", "blood_pressure": "blood_pressure",
-            "skin_thickness": "skin_thickness", "insulin": "insulin",
-        }
-        for src_key, dst_key in field_map.items():
+        for src_key in ["glucose", "bmi", "age", "pregnancies", "blood_pressure", "skin_thickness", "insulin"]:
             if src_key in params:
                 val = params[src_key]
-                auto_labs[dst_key] = float(val["value"]) if isinstance(val, dict) else float(val)
+                auto_labs[src_key] = float(val["value"]) if isinstance(val, dict) else float(val)
         if auto_labs:
             pima_result = _pima_model.predict(auto_labs)
 
-    # Step C — context assembly (includes pima_result)
-    upstream_context = build_context(report_context, risk_context, manual_text, pima_result)
+    # Step C — context assembly
+    upstream_context = build_context(report_context, manual_text, pima_result)
+
+    # Step C2 — complication risk assessment
+    resolved_syms = symptom_map_result.get("semantic_matches", [])
+    resolved_canonical = [m["matched_to"] for m in resolved_syms if m.get("matched_to")]
+    complication_result = assess_complication_risks(
+        symptoms=symptoms,
+        resolved_symptoms=resolved_canonical,
+        report_context=report_context,
+    )
+    complication_summary_str = _format_complication_summary(complication_result)
 
     # Prepare prompt variables
-    top_hyp   = symptom_map_result.get("top_hypothesis", "No condition mapped")
-    hyps      = symptom_map_result.get("condition_hypotheses", [])
+    top_hyp = symptom_map_result.get("top_hypothesis", "No condition mapped")
+    hyps = symptom_map_result.get("condition_hypotheses", [])
     unmatched = symptom_map_result.get("unmatched_symptoms", [])
 
     symp_text = "\n".join(f"  - {s}" for s in symptoms) if symptoms else "  None provided."
-    hyp_text  = "\n".join(
+    hyp_text = "\n".join(
         f"  - {h['condition']}: {h['match_count']} symptom(s) matched "
         f"({', '.join(h['matched_symptoms'][:3])}{'...' if len(h['matched_symptoms']) > 3 else ''})"
         for h in hyps[:5]
@@ -1117,26 +1382,28 @@ def analyze_symptoms(
         else "Not available (no lab values provided)"
     )
 
-    # Step D — reasoning (LLM or rule-based)
-    reasoning  = ""
+    # Step D — reasoning
+    reasoning = ""
     model_used = "rule-based"
-    fallback   = _rule_based_reasoning(symptom_map_result, upstream_context, symptoms, pima_result)
+    fallback = _rule_based_reasoning(symptom_map_result, upstream_context, symptoms, pima_result)
+    fallback += _rule_based_complication_section(complication_result)
 
     if use_llm:
         chain = _build_chain()
         if chain:
             try:
                 llm_output = chain.invoke({
-                    "upstream_context":   upstream_context,
-                    "symptom_map":        hyp_text,
-                    "symptoms_text":      symp_text,
-                    "top_hypothesis":     top_hyp,
-                    "unmatched_symptoms": unmatched_text,
-                    "pima_probability":   pima_prob_text,
+                    "upstream_context":    upstream_context,
+                    "symptom_map":         hyp_text,
+                    "symptoms_text":       symp_text,
+                    "top_hypothesis":      top_hyp,
+                    "unmatched_symptoms":  unmatched_text,
+                    "pima_probability":    pima_prob_text,
+                    "complication_summary": complication_summary_str,
                 })
                 llm_output = _clean_llm_output(llm_output if isinstance(llm_output, str) else "")
                 if llm_output and len(llm_output.strip()) > 80:
-                    reasoning  = llm_output.strip()
+                    reasoning = llm_output.strip()
                     model_used = REASONING_MODEL["id"]
                     logger.info(f"Reasoning via {REASONING_MODEL['name']}")
                 else:
@@ -1149,27 +1416,28 @@ def analyze_symptoms(
 
     sources_used = []
     if report_context: sources_used.append("ReportAnalyzerAgent")
-    if risk_context:   sources_used.append("RiskPredictorAgent")
     if lab_values:     sources_used.append("PimaLabValues")
     if manual_text:    sources_used.append("ManualText")
     if symptoms:       sources_used.append("SymptomCheckboxes")
 
     return {
-        "symptom_mapping": symptom_map_result,
-        "pima_prediction": pima_result,
-        "pima_metrics":    _pima_model.metrics,
-        "reasoning":       reasoning,
-        "model_used":      model_used,
+        "symptom_mapping":      symptom_map_result,
+        "pima_prediction":      pima_result,
+        "pima_metrics":         _pima_model.metrics,
+        "complication_risks":   complication_result,
+        "reasoning":            reasoning,
+        "model_used":           model_used,
         "input_summary": {
-            "symptoms_count": len(symptoms),
-            "sources_used":   sources_used,
-            "top_hypothesis": top_hyp,
+            "symptoms_count":            len(symptoms),
+            "sources_used":              sources_used,
+            "top_hypothesis":            top_hyp,
+            "emergency_alert":           complication_result.get("emergency_alert", {}),
+            "overall_complication_risk": complication_result.get("overall_complication_risk", "Low"),
         },
     }
 
 
 def get_accuracy_report() -> str:
-    """Return the full accuracy report for the Pima dataset model."""
     return _pima_model.get_accuracy_report()
 
 
@@ -1177,6 +1445,7 @@ __all__ = [
     "analyze_symptoms",
     "map_symptoms_to_conditions",
     "build_context",
+    "assess_complication_risks",
     "get_accuracy_report",
     "SYMPTOM_CATEGORIES",
     "MEDICAL_SYNONYMS",
@@ -1194,65 +1463,61 @@ if __name__ == "__main__":
     import json
     logging.basicConfig(level=logging.INFO)
 
-    print("\n" + "=" * 60)
-    print("TEST 1 — ACCURACY REPORT (Pima Dataset)")
-    print("=" * 60)
-    print(get_accuracy_report())
-
-    print("\n" + "=" * 60)
-    print("TEST 2 — SEMANTIC MATCHING (free-text input)")
-    print("=" * 60)
-    free_text_symptoms = [
-        "always thirsty",
-        "peeing too much at night",
-        "feet tingling and numb",
-        "shaking hands in the morning",
-        "my vision is blurry",
-        "feel tired all the time",
-        "belly fat",
-        "dark patches on neck",
-        "completely unrelated phrase",
+    symptoms = [
+        "Polydipsia (excessive thirst)",
+        "Polyuria (frequent urination)",
+        "Tingling or numbness in feet or hands",
+        "Dark spots or floaters in vision",
+        "Foamy or frothy urine (proteinuria)",
+        "Chest pain or pressure",
+        "Elevated blood pressure",
     ]
-    match_result = _matcher.match_all(free_text_symptoms)
-    print("Semantic matches:")
-    for m in match_result["matched"]:
-        print(f"  {m[2]:.3f}  '{m[0]}' → '{m[1]}'")
-    print("Unmatched:")
-    for u in match_result["unmatched"]:
-        print(f"  {u[1]:.3f}  '{u[0]}'")
 
-    print("\n" + "=" * 60)
-    print("TEST 3 — PIMA ML PREDICTION")
-    print("=" * 60)
-    lab_cases = [
-        {"label": "High risk patient",    "values": {"glucose": 148, "bmi": 33.6, "age": 50, "pregnancies": 6}},
-        {"label": "Low risk patient",     "values": {"glucose": 85,  "bmi": 26.6, "age": 31, "pregnancies": 1}},
-        {"label": "Borderline patient",   "values": {"glucose": 120, "bmi": 29.0, "age": 40, "pregnancies": 3}},
-    ]
-    for case in lab_cases:
-        pred = _pima_model.predict(case["values"])
-        print(f"  {case['label']}: {pred['probability_pct']} → {pred['prediction']} ({pred['risk_level']})")
-
-    print("\n" + "=" * 60)
-    print("TEST 4 — FULL PIPELINE (free-text symptoms + lab values)")
-    print("=" * 60)
     result = analyze_symptoms(
-        symptoms   = free_text_symptoms[:7],
-        lab_values = {"glucose": 148, "bmi": 29.1, "age": 45, "pregnancies": 3},
-        manual_text = "Symptoms worsening over 3 months. Family history of Type 2 diabetes.",
-        use_llm    = True,
+        symptoms       = symptoms,
+        lab_values     = {"glucose": 148, "bmi": 29.1, "age": 45, "pregnancies": 3},
+        report_context = {
+            "parameters": {
+                "hba1c":   {"value": 6.8, "unit": "%", "status": "High", "note": "Diabetic range (ADA)"},
+                "glucose": {"value": 148, "unit": "mg/dL", "status": "High"},
+            },
+            "abnormal_parameters": ["hba1c", "glucose"],
+            "endocrine_flags": ["DIABETES CRITERIA MET"],
+        },
+        manual_text = "Family history of diabetes and heart disease.",
+        use_llm     = True,
     )
-    print("\n-- Symptom mapping --")
+
+    print("\n=== SYMPTOM MAPPING ===")
     for h in result["symptom_mapping"]["condition_hypotheses"]:
         print(f"  {h['condition']}: {h['match_count']} matched ({h['coverage']})")
-    print("\n-- Semantic resolution --")
-    for m in result["symptom_mapping"].get("semantic_matches", []):
-        if m["score"] < 1.0:
-            print(f"  '{m['input']}' → '{m['matched_to']}' ({m['score']:.3f})")
+
+    alert = result["complication_risks"]["emergency_alert"]
+    if alert["is_emergency"]:
+        print(f"\n{'='*60}")
+        print(f"  ⚠️  EMERGENCY: {alert['message']}")
+        print(f"{'='*60}")
+
+    print(f"\n=== COMPLICATION RISKS ===")
+    print(f"  Overall: {result['complication_risks']['overall_complication_risk']}")
+    for comp in result["complication_risks"]["complications"]:
+        icon = {"Critical": "🚨", "High": "⚠️ ", "Moderate": "🔶", "Low": "✅"}.get(comp["risk_level"], "")
+        print(f"  {icon} {comp['name']}: {comp['risk_level']} (score {comp['score']}/100)")
+        if comp["matched_symptoms"]:
+            print(f"       Matched: {', '.join(comp['matched_symptoms'])}")
+
+    print(f"\n=== MODEL USED: {result['model_used']} ===")
+    print(f"\n=== CLINICAL REASONING ===")
+    print(result["reasoning"])
+
     if result.get("pima_prediction"):
         p = result["pima_prediction"]
-        print(f"\n-- Pima ML prediction --")
-        print(f"  {p['probability_pct']} → {p['prediction']} ({p['risk_level']})")
-    print(f"\n-- Model used: {result['model_used']} --")
-    print(f"\n-- Clinical reasoning --\n{result['reasoning']}")
-    print(f"\n-- Input summary --\n{json.dumps(result['input_summary'], indent=2)}")
+        m = result["pima_metrics"]
+        print(f"\n=== MODEL ACCURACY (Pima Indians Diabetes Dataset) ===")
+        print(f"  Dataset:      {m['total_samples']} patients ({m['diabetic_samples']} diabetic / {m['non_diabetic_samples']} non-diabetic)")
+        print(f"  CV Accuracy:  {m['cv_accuracy']:.2%} +/- {m['cv_accuracy_std']:.2%}")
+        print(f"  ROC-AUC:      {m['cv_roc_auc']:.4f} +/- {m['cv_roc_auc_std']:.4f}")
+        print(f"  ML Prediction: {p['probability_pct']} -> {p['prediction']} [{p['risk_level']} risk]")
+
+    print(f"\n=== INPUT SUMMARY ===")
+    print(json.dumps(result["input_summary"], indent=2))
