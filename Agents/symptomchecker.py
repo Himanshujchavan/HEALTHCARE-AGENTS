@@ -476,8 +476,10 @@ def assess_complication_risks(
     emergencies_detected = []
     for emergency_name, trigger_list in _EMERGENCY_TRIGGERS.items():
         for trigger in trigger_list:
-            if (trigger in all_symptoms_set or
-                    any(trigger.lower() in s.lower() for s in symptoms)):
+            if any(
+                trigger.lower() == s.lower() or trigger.lower() in s.lower()
+                for s in symptoms
+                ):
                 emergencies_detected.append(emergency_name)
                 break
 
@@ -906,6 +908,13 @@ class SemanticSymptomMatcher:
 
 _matcher = SemanticSymptomMatcher(threshold=0.35)
 
+def get_canonical_symptoms(symptom_map_result: Dict) -> List[str]:
+    """
+    SINGLE SOURCE OF TRUTH for all downstream engines.
+    Ensures consistent symptom representation across ML + LLM + rules.
+    """
+    return symptom_map_result.get("canonical_list", [])    
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 3 — PIMA INDIANS DIABETES DATASET + LOGISTIC REGRESSION
@@ -1034,13 +1043,20 @@ class PimaModel:
         y = df["outcome"].values
 
         self._scaler = StandardScaler()
+        X = np.nan_to_num(X, nan=np.nanmedian(X))
         X_scaled = self._scaler.fit_transform(X)
 
         X_train, X_test, y_train, y_test = train_test_split(
             X_scaled, y, test_size=0.20, random_state=42, stratify=y
         )
 
-        self._model = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
+        self._model = LogisticRegression(
+    max_iter=1500,
+    random_state=42,
+    C=0.8,
+    class_weight="balanced",
+    solver="lbfgs"
+)
         self._model.fit(X_train, y_train)
 
         y_pred = self._model.predict(X_test)
@@ -1118,6 +1134,7 @@ class PimaModel:
 
         X = self._scaler.transform(df_input[_PIMA_FEATURE_COLS].values)
         prob = float(self._model.predict_proba(X)[0, 1])
+        prob = np.clip(prob, 0.01, 0.99)
         prediction = "Diabetes" if prob >= 0.50 else "No Diabetes"
 
         if prob >= 0.80:
@@ -1211,7 +1228,19 @@ def map_symptoms_to_conditions(symptoms: List[str]) -> Dict[str, Any]:
             }
             all_mapped.update(matched)
 
-    ranked = sorted(scored.items(), key=lambda x: x[1]["match_count"], reverse=True)
+    def severity_score(condition, matched_symptoms):
+        profile = _COMPLICATION_PROFILES.get(condition, {})
+        weights = profile.get("weights", {})
+        return sum(weights.get(s, 0) for s in matched_symptoms)
+
+    ranked = sorted(
+    scored.items(),
+    key=lambda x: (
+        x[1]["match_count"],
+        severity_score(x[0], x[1]["matched_symptoms"])
+    ),
+    reverse=True
+)
     unmatched = [s for s in canonical_list if s not in all_mapped] + unmatched_inputs
 
     return {
@@ -1287,6 +1316,10 @@ SYMPTOM_REASONING_PROMPT = PromptTemplate(
 Your role is diabetes symptom analysis, complication risk assessment, and clinical reasoning.
 Lab validation has already been done by the upstream agent — use its output as context.
 
+=== HARD BOUNDARY RULE (CRITICAL SAFETY CONSTRAINT) ===
+You are NOT allowed to override structured risk outputs.
+If structured engine says LOW/MODERATE risk, you must not escalate to CRITICAL unless explicit emergency symptoms exist.
+
 === UPSTREAM AGENT CONTEXT ===
 {upstream_context}
 
@@ -1315,7 +1348,7 @@ Write a focused clinical note. Use EXACTLY this structure, no more than 250 word
 6. CLINICAL RECOMMENDATION: Specific next steps — which specialists, which tests, which lifestyle or medication changes. Address both diabetes and any identified complications.
 
 Be concise and clinically precise. Do not repeat lab values verbatim.
-Do not add AI disclaimers or suggest consulting a doctor generically — give specific specialty referrals.
+Be clinically cautious. Do not over-escalate severity beyond structured risk signals. — give specific specialty referrals.
 Do not use markdown formatting, headers, or bullet symbols. Write in plain numbered sections only.
 If any emergency symptoms are present, begin the note with EMERGENCY ALERT before section 1.""",
 )
@@ -1486,13 +1519,13 @@ def analyze_symptoms(
     upstream_context = build_context(report_context, manual_text, pima_result)
 
     # Step C2 — complication risk assessment
-    resolved_syms = symptom_map_result.get("semantic_matches", [])
-    resolved_canonical = [m["matched_to"] for m in resolved_syms if m.get("matched_to")]
+    canonical_symptoms = get_canonical_symptoms(symptom_map_result)
+
     complication_result = assess_complication_risks(
-        symptoms=all_symptoms_for_mapping,   # pass full combined list
-        resolved_symptoms=resolved_canonical,
-        report_context=report_context,
-    )
+    symptoms=all_symptoms_for_mapping,   # full input (checkbox + text)
+    resolved_symptoms=canonical_symptoms,
+    report_context=report_context,
+)
     complication_summary_str = _format_complication_summary(complication_result)
 
     # Prepare prompt variables
@@ -1538,6 +1571,13 @@ def analyze_symptoms(
                     "pima_probability":    pima_prob_text,
                     "complication_summary": complication_summary_str,
                 })
+                if llm_output:
+                    high_terms = ["CRITICAL", "EMERGENCY", "LIFE THREATENING"]
+
+                    if any(term in llm_output for term in high_terms):
+                        if complication_result.get("overall_complication_risk") in ["Low", "Moderate"]:
+                            logger.warning("LLM over-escalation blocked")
+                            llm_output = ""
                 llm_output = _clean_llm_output(llm_output if isinstance(llm_output, str) else "")
                 if llm_output and len(llm_output.strip()) > 80:
                     reasoning = llm_output.strip()
@@ -1556,6 +1596,20 @@ def analyze_symptoms(
     if lab_values:     sources_used.append("PimaLabValues")
     if manual_text:    sources_used.append("ManualText")
     if symptoms:       sources_used.append("SymptomCheckboxes")
+    
+    ml_risk = pima_result.get("risk_level") if pima_result else "Low"
+    comp_risk = complication_result.get("overall_complication_risk", "Low")
+    sym_risk = symptom_map_result.get("top_hypothesis", "")
+
+    risk_levels = {"Low": 1, "Moderate": 2, "High": 3, "Critical": 4}
+
+    final_score = max(
+        risk_levels.get(ml_risk, 1),
+        risk_levels.get(comp_risk, 1),
+        3 if "Cardiovascular Risk" in comp_risk else 1
+    )
+
+    final_risk = {1: "Low", 2: "Moderate", 3: "High", 4: "Critical"}[final_score]
 
     return {
         "symptom_mapping":      symptom_map_result,
@@ -1564,6 +1618,7 @@ def analyze_symptoms(
         "complication_risks":   complication_result,
         "reasoning":            reasoning,
         "model_used":           model_used,
+        "final_risk_level": final_risk,
         "input_summary": {
             "symptoms_count":            len(all_symptoms_for_mapping),
             "checkbox_symptoms_count":   len(symptoms),
