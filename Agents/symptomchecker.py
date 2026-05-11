@@ -1347,6 +1347,10 @@ Write a focused clinical note. Use EXACTLY this structure, no more than 250 word
 5. DIFFERENTIAL: 1-2 alternative conditions the unmatched or overlapping symptoms may suggest.
 6. CLINICAL RECOMMENDATION: Specific next steps — which specialists, which tests, which lifestyle or medication changes. Address both diabetes and any identified complications.
 
+You MUST NOT change the top_hypothesis provided.
+You must treat it as FINAL from structured engine.
+Do not replace it with any new condition (e.g., hypoglycemia).
+
 Be concise and clinically precise. Do not repeat lab values verbatim.
 Be clinically cautious. Do not over-escalate severity beyond structured risk signals. — give specific specialty referrals.
 Do not use markdown formatting, headers, or bullet symbols. Write in plain numbered sections only.
