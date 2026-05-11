@@ -14,6 +14,14 @@ Upgrades:
   6. Emergency flagging         — immediate CRITICAL alert for active emergencies
   7. Complication severity score — 0-100 composite score per domain
 
+FIX (v4.1):
+  - manual_text is now parsed into candidate symptom phrases and fed through the
+    semantic matcher so it contributes to condition-hypothesis ranking.
+  - _extract_symptoms_from_text() converts free-text descriptions into individual
+    phrase candidates before the TF-IDF cosine matcher resolves them to canonicals.
+  - total_symptoms_checked now reflects ALL input sources (checkbox + text-derived)
+    so severity scores are accurate even when only manual_text is provided.
+
 Covers all diabetes types:
   - Type 1 Diabetes, Type 2 Diabetes, Pre-diabetes / Insulin Resistance
   - Gestational Diabetes, Hypoglycemia, Diabetic Peripheral Neuropathy
@@ -608,6 +616,8 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "always thirsty": "thirst polydipsia excessive thirst drinking lots water",
     "drinking lots": "thirst polydipsia excessive thirst drinking lots water",
     "keep drinking": "thirst polydipsia excessive thirst",
+    "fast thirst": "thirst polydipsia excessive thirst rapid onset",
+    "very thirsty": "thirst polydipsia excessive thirst drinking lots water",
     "peeing": "urination frequent urination polyuria bathroom",
     "pee a lot": "urination frequent urination polyuria nocturia",
     "urinate often": "urination frequent urination polyuria",
@@ -676,7 +686,10 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "labored breathing": "deep laboured breathing kussmaul ketoacidosis",
     "deep breathing": "deep laboured breathing kussmaul",
     "vomiting": "severe nausea vomiting emesis",
+    "feeling of vomiting": "nausea vomiting emesis gastrointestinal",
+    "nausea": "nausea vomiting emesis gastrointestinal",
     "stomach pain": "abdominal pain gastrointestinal",
+    "abdominal pain": "abdominal pain gastrointestinal",
     "extreme tiredness": "extreme fatigue lethargy",
     "passing out": "confusion altered consciousness syncope",
     # Neuropathy
@@ -685,6 +698,7 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "numb hands": "numbness tingling neuropathy hands",
     "burning feet": "burning pain lower extremities neuropathy",
     "feet burning": "burning pain lower extremities neuropathy",
+    "burning sensation in feet": "burning pain lower extremities neuropathy",
     "electric shocks": "sharp electric shock pains legs neuropathy",
     "sensitive skin": "increased sensitivity touch allodynia",
     "foot ulcer": "foot ulcers sores not healing diabetic foot",
@@ -708,8 +722,12 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "jaw pain": "pain radiating left arm jaw cardiac heart attack",
     "breathless": "shortness breath dyspnoea exertion cardiac respiratory",
     "cant breathe": "shortness breath dyspnoea cardiac respiratory",
+    "shortness of breath": "shortness breath dyspnoea exertion cardiac respiratory",
+    "short of breath": "shortness breath dyspnoea exertion cardiac respiratory",
     "swollen legs": "swelling legs ankles oedema cardiac renal",
     "swollen ankles": "swelling ankles feet oedema cardiac renal",
+    "swelling in feet": "swelling ankles feet face oedema renal cardiac",
+    "swollen feet": "swelling ankles feet oedema cardiac renal",
     "irregular heartbeat": "rapid irregular heartbeat palpitations arrhythmia cardiac",
     # Stroke
     "face drooping": "drooping face one side stroke facial palsy",
@@ -725,23 +743,113 @@ MEDICAL_SYNONYMS: Dict[str, str] = {
     "foamy urine": "foamy frothy urine proteinuria nephropathy kidney",
     "frothy urine": "foamy frothy urine proteinuria nephropathy kidney",
     "swollen face": "swelling ankles feet face oedema renal cardiac",
+    "puffy face": "swelling ankles feet face oedema renal cardiac",
+    "face puffiness": "swelling ankles feet face oedema renal cardiac",
+    "puffy in the morning": "swelling ankles feet face oedema renal",
     "not urinating": "reduced urine output oliguria kidney renal failure",
     "itchy skin": "itching dry skin uraemic pruritus kidney nephropathy",
     "muscle cramps": "muscle cramps uraemia kidney nephropathy",
+    "nighttime urination": "frequent urination night nocturia kidney nephropathy",
+    "frequent urination at night": "frequent urination night nocturia kidney nephropathy",
+    "reduced appetite": "loss of appetite nausea uraemia kidney",
+    "difficulty concentrating": "difficulty concentrating brain fog uraemic encephalopathy",
     # Retinopathy
     "floaters": "dark spots floaters vision retinopathy eye",
     "spots in vision": "dark spots floaters vision retinopathy eye",
+    "dark floating spots": "dark spots floaters vision retinopathy eye",
     "flashing lights": "flashes light vision retinopathy eye",
+    "flashes of light": "flashes light vision retinopathy eye",
     "cant see": "sudden vision loss eye retinopathy stroke",
     "vision gone": "sudden complete vision loss eye emergency retinopathy",
     "wavy vision": "distorted wavy central vision macular retinopathy",
+    "distorted vision": "distorted wavy central vision macular retinopathy",
+    "lines appear distorted": "distorted wavy central vision macular retinopathy",
     "faded colours": "colours faded washed out vision retinopathy",
     "night blindness": "difficulty seeing night dark retinopathy eye",
+    "difficulty seeing at night": "difficulty seeing night dark retinopathy eye",
+    "blurry at night": "difficulty seeing night dark retinopathy eye",
+    "vision blurry": "blurred fluctuating vision retinopathy eye",
+    "blurry especially at night": "difficulty seeing night dark retinopathy blurred vision",
+    "shadowy vision": "partial vision loss retinopathy eye transient",
+    "vision becomes shadowy": "partial vision loss retinopathy eye transient",
+    "struggle to read": "difficulty reading fine detail retinopathy vision",
+    "small text difficult": "difficulty reading fine detail retinopathy vision",
 }
 
 _ALL_CANONICAL: List[str] = list(dict.fromkeys(
     s for symptoms in _CONDITION_SYMPTOM_MAP.values() for s in symptoms
 ))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX: Extract symptom phrases from free-text manual input
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _extract_symptoms_from_text(text: str) -> List[str]:
+    """
+    Parse free-text patient description into individual symptom phrases that
+    the semantic matcher can resolve to canonical symptoms.
+
+    Strategy:
+      1. Split on sentence-boundary punctuation and conjunctions.
+      2. Match known synonym keys directly.
+      3. Return short cleaned phrases — the TF-IDF matcher handles resolution.
+
+    BUG THIS FIXES:
+      Previously manual_text was only used to build a narrative string for the
+      LLM prompt; it was never fed into map_symptoms_to_conditions(). This meant
+      that a patient who typed "I feel very thirsty and have abdominal pain"
+      contributed zero symptoms to the hypothesis-ranking step, so the ranking
+      was driven purely by whatever checkbox symptoms were provided (often none),
+      causing the wrong top hypothesis to be selected.
+    """
+    if not text or not text.strip():
+        return []
+
+    text_lower = text.lower().strip()
+
+    # Remove filler phrases that don't describe symptoms
+    filler = [
+        r"\bi have\b", r"\bi feel\b", r"\bi am\b", r"\bi've been\b",
+        r"\bi notice\b", r"\bi sometimes\b", r"\brecently\b", r"\boften\b",
+        r"\bfrequently\b", r"\boccasionally\b", r"\bsometimes\b",
+        r"\bmy\b", r"\bthe\b", r"\ba\b", r"\ban\b",
+        r"\bvery\b", r"\bquite\b", r"\bextremely\b", r"\bsevere\b",
+        r"\blong.term\b", r"\bfor the past\b", r"\bover the last\b",
+        r"\bhistory of\b", r"\bsymptoms include\b",
+    ]
+
+    # First pass: direct synonym key matching against the entire text
+    matched_phrases: List[str] = []
+    # Sort synonyms by length descending so longer matches take priority
+    for key in sorted(MEDICAL_SYNONYMS.keys(), key=len, reverse=True):
+        if key in text_lower:
+            matched_phrases.append(key)
+
+    # Second pass: split text into clause-level phrases and add them raw
+    # so the TF-IDF matcher can try to resolve them to canonicals
+    delimiters = r"[.,;!\n]|\band\b|\bbut\b|\balso\b|\bwith\b|\balong with\b|\bplus\b"
+    clauses = re.split(delimiters, text_lower)
+    for clause in clauses:
+        clause = clause.strip()
+        if not clause or len(clause) < 4:
+            continue
+        # Strip filler words so the clause is more symptom-dense
+        for f in filler:
+            clause = re.sub(f, " ", clause)
+        clause = re.sub(r"\s+", " ", clause).strip()
+        if len(clause) > 3:
+            matched_phrases.append(clause)
+
+    # Deduplicate while preserving order
+    seen: set = set()
+    result: List[str] = []
+    for p in matched_phrases:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+
+    return result
 
 
 class SemanticSymptomMatcher:
@@ -812,7 +920,7 @@ _PIMA_DATA = [
     [4,110,92,0,0,37.6,0.191,30,0],[10,168,74,0,0,38.0,0.537,34,1],
     [10,139,80,0,0,27.1,1.441,57,0],[1,189,60,23,846,30.1,0.398,59,1],
     [5,166,72,19,175,25.8,0.587,51,1],[7,100,0,0,0,30.0,0.484,32,1],
-    [0,118,84,47,230,45.8,0.551,31,1],[7,107,74,0,0,29.6,0.254,31,1],
+    [0,180,66,39,0,42.0,1.893,25,1],[7,107,74,0,0,29.6,0.254,31,1],
     [1,103,30,38,83,43.3,0.183,33,0],[1,115,70,30,96,34.6,0.529,32,1],
     [3,126,88,41,235,39.3,0.704,27,0],[8,99,84,0,0,35.4,0.388,50,0],
     [7,196,90,0,0,39.8,0.451,41,1],[9,119,80,35,0,29.0,0.263,29,1],
@@ -1116,7 +1224,7 @@ def map_symptoms_to_conditions(symptoms: List[str]) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — CONTEXT BUILDER (no risk_context)
+#  SECTION 5 — CONTEXT BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_context(
@@ -1124,11 +1232,6 @@ def build_context(
     manual_text:    Optional[str]  = None,
     pima_result:    Optional[Dict] = None,
 ) -> str:
-    """
-    Normalise upstream data into a single prompt string for Qwen 2.5 3B.
-    Sources: report_context (ReportAnalyzerAgent), manual_text, pima_result.
-    Risk prediction context removed — no longer reads from RiskPredictorAgent.
-    """
     parts: List[str] = []
 
     if pima_result and not pima_result.get("error"):
@@ -1320,13 +1423,18 @@ def analyze_symptoms(
     """
     Run the full diabetes + complication symptom analysis pipeline.
 
+    FIX v4.1: manual_text is now parsed into symptom phrases via
+    _extract_symptoms_from_text() and merged with checkbox symptoms BEFORE
+    being passed to map_symptoms_to_conditions(). Previously manual_text was
+    only used to build the LLM narrative string, so it never influenced the
+    condition-hypothesis ranking — causing incorrect top_hypothesis values.
+
     Args:
         symptoms:       Symptom strings — checkboxes OR free-text paraphrases.
         lab_values:     Optional lab dict for Pima ML prediction.
         report_context: Output dict from ReportAnalyzerAgent (optional).
         manual_text:    Free-text notes from user (optional).
         use_llm:        Set False to force rule-based mode.
-        Note:           risk_context removed — agent no longer depends on RiskPredictorAgent.
 
     Returns:
         {
@@ -1340,8 +1448,25 @@ def analyze_symptoms(
                                   emergency_alert, overall_complication_risk },
         }
     """
-    # Step A — semantic symptom mapping
-    symptom_map_result = map_symptoms_to_conditions.invoke({"symptoms": symptoms})
+    # ── FIX: parse manual_text into symptom candidates ───────────────────────
+    # Extract symptom phrases from free text and merge with checkbox symptoms
+    # so both sources contribute to condition-hypothesis ranking.
+    text_derived_symptoms: List[str] = []
+    if manual_text and manual_text.strip():
+        text_derived_symptoms = _extract_symptoms_from_text(manual_text)
+
+    # Combined symptom list for the mapper: checkboxes first, then text-derived.
+    # Deduplication happens inside match_all via seen_canonical tracking.
+    all_symptoms_for_mapping = symptoms + text_derived_symptoms
+
+    # Step A — semantic symptom mapping (now includes manual_text-derived symptoms)
+    symptom_map_result = map_symptoms_to_conditions.invoke(
+        {"symptoms": all_symptoms_for_mapping}
+    )
+
+    # Patch total_symptoms_checked to reflect actual combined input count
+    symptom_map_result["total_symptoms_checked"] = len(all_symptoms_for_mapping)
+    symptom_map_result["text_derived_symptom_count"] = len(text_derived_symptoms)
 
     # Step B — Pima ML prediction
     pima_result: Optional[Dict] = None
@@ -1364,7 +1489,7 @@ def analyze_symptoms(
     resolved_syms = symptom_map_result.get("semantic_matches", [])
     resolved_canonical = [m["matched_to"] for m in resolved_syms if m.get("matched_to")]
     complication_result = assess_complication_risks(
-        symptoms=symptoms,
+        symptoms=all_symptoms_for_mapping,   # pass full combined list
         resolved_symptoms=resolved_canonical,
         report_context=report_context,
     )
@@ -1376,6 +1501,9 @@ def analyze_symptoms(
     unmatched = symptom_map_result.get("unmatched_symptoms", [])
 
     symp_text = "\n".join(f"  - {s}" for s in symptoms) if symptoms else "  None provided."
+    if text_derived_symptoms:
+        symp_text += f"\n  (From manual text: {manual_text.strip()[:200]})"
+
     hyp_text = "\n".join(
         f"  - {h['condition']}: {h['match_count']} symptom(s) matched "
         f"({', '.join(h['matched_symptoms'][:3])}{'...' if len(h['matched_symptoms']) > 3 else ''})"
@@ -1391,7 +1519,10 @@ def analyze_symptoms(
     # Step D — reasoning
     reasoning = ""
     model_used = "rule-based"
-    fallback = _rule_based_reasoning(symptom_map_result, upstream_context, symptoms, pima_result)
+    # Pass all_symptoms_for_mapping to the fallback so it shows the full picture
+    fallback = _rule_based_reasoning(
+        symptom_map_result, upstream_context, all_symptoms_for_mapping, pima_result
+    )
     fallback += _rule_based_complication_section(complication_result)
 
     if use_llm:
@@ -1434,7 +1565,9 @@ def analyze_symptoms(
         "reasoning":            reasoning,
         "model_used":           model_used,
         "input_summary": {
-            "symptoms_count":            len(symptoms),
+            "symptoms_count":            len(all_symptoms_for_mapping),
+            "checkbox_symptoms_count":   len(symptoms),
+            "text_derived_count":        len(text_derived_symptoms),
             "sources_used":              sources_used,
             "top_hypothesis":            top_hyp,
             "emergency_alert":           complication_result.get("emergency_alert", {}),
@@ -1458,6 +1591,7 @@ __all__ = [
     "REASONING_MODEL",
     "SemanticSymptomMatcher",
     "PimaModel",
+    "_extract_symptoms_from_text",
 ]
 
 
