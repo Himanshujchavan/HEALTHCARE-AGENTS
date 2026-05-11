@@ -273,10 +273,12 @@ class AlertAgent:
 						"system",
 						"You are a healthcare communication assistant. "
 						"Write a concise, patient-friendly report in simple English. "
-						"Use 5-7 short sentences. Avoid medical jargon and do not diagnose. "
-						"Include risk level, key lab or symptom drivers, and next steps. "
-						"If symptoms like chest discomfort or shortness of breath are present, "
-						"mention urgent evaluation if severe or worsening.",
+						"Use 8-10 short sentences. Avoid medical jargon and do not diagnose. "
+						"Explain only: risk level and probability, key parameters, "
+						"and the symptom checker findings (selected symptoms + manual notes). "
+						"Expand on what each parameter suggests in context, and explain how the "
+						"reported symptoms align with the top hypothesis. "
+						"Do not add treatment advice or generic warnings.",
 					),
 					(
 						"user",
@@ -304,54 +306,32 @@ class AlertAgent:
 	def _generate_report_fallback(self, result: Dict[str, Any], evaluation: Dict[str, Any]) -> str:
 		metrics = evaluation["metrics"]
 		level = evaluation["risk_level"]
-		alert = evaluation["alert"]
 
-		notes: List[str] = []
-		lab_summary = self._build_lab_summary(result)
-		symptom_context = self._build_symptom_context(result)
+		lines: List[str] = []
 
 		if metrics.get("diabetes_probability") is not None:
 			percentage = int(round(metrics["diabetes_probability"] * 100))
-			notes.append(f"Estimated diabetes risk probability is about {percentage}%.")
+			lines.append(f"Risk Level: {level}. Estimated diabetes risk is about {percentage}%.")
+		else:
+			lines.append(f"Risk Level: {level}.")
 
+		param_parts: List[str] = []
 		if metrics.get("hba1c") is not None:
-			if metrics["hba1c"] > self.thresholds.hba1c:
-				notes.append("HbA1c is above the typical range, which can indicate higher long-term blood sugar.")
-			else:
-				notes.append("HbA1c is within the typical range.")
-
+			param_parts.append(f"HbA1c {metrics['hba1c']:.1f}%")
 		if metrics.get("glucose") is not None:
-			if metrics["glucose"] >= 126:
-				notes.append("Glucose is elevated and may signal impaired blood sugar control.")
-			elif metrics["glucose"] >= 100:
-				notes.append("Glucose is mildly elevated and should be monitored.")
-			else:
-				notes.append("Glucose is within the expected range.")
-
+			param_parts.append(f"Glucose {metrics['glucose']:.0f}")
 		if metrics.get("bmi") is not None:
-			if metrics["bmi"] >= 30:
-				notes.append("BMI is in the obesity range, which can increase metabolic risk.")
-			elif metrics["bmi"] >= 25:
-				notes.append("BMI is in the overweight range.")
+			param_parts.append(f"BMI {metrics['bmi']:.1f}")
+		if metrics.get("abnormal_parameters") is not None:
+			param_parts.append(f"Abnormal parameters {metrics['abnormal_parameters']}")
+		if param_parts:
+			lines.append("Key parameters: " + ", ".join(param_parts) + ".")
 
-		recommendation = (
-			"Please arrange a clinical follow-up soon to review these results and discuss confirmatory tests."
-			if alert
-			else "Continue healthy habits and schedule routine monitoring with your clinician."
-		)
-
-		base = " ".join(notes).strip() or "Your recent health data was reviewed."
-
-		parts = [
-			f"{base} Risk Level: {level}.",
-		]
-		if lab_summary:
-			parts.append(f"Lab details: {lab_summary}")
+		symptom_context = self._build_symptom_context(result)
 		if symptom_context:
-			parts.append(symptom_context)
-		parts.append(recommendation)
+			lines.append(symptom_context)
 
-		return " ".join(parts).strip()
+		return " ".join(lines).strip()
 
 	def _build_compact_llm_context(
 		self,
@@ -380,6 +360,7 @@ class AlertAgent:
 			"symptom_alignment": symptom_result.get("symptom_alignment"),
 			"severity_score": symptom_result.get("severity_score"),
 			"top_hypothesis": symptom_info.get("top_hypothesis"),
+			"manual_text": result.get("manual_text"),
 		}
 
 	def _build_lab_summary(self, result: Dict[str, Any]) -> str:
@@ -443,8 +424,9 @@ class AlertAgent:
 
 	def _build_symptom_context(self, result: Dict[str, Any]) -> str:
 		info = self._extract_symptom_info(result)
+		manual_text = result.get("manual_text")
 		if not info["symptoms"] and not info["unmatched_symptoms"]:
-			return ""
+			return "" if not manual_text else f"Manual notes: {manual_text.strip()}."
 
 		lines: List[str] = []
 		if info["matched_symptoms"] and info["top_hypothesis"]:
@@ -456,16 +438,17 @@ class AlertAgent:
 		elif info["symptoms"]:
 			lines.append("Symptoms reported: " + ", ".join(info["symptoms"][:6]) + ".")
 
-		non_diabetes_notes = self._build_non_diabetes_notes(info["symptoms"], info["unmatched_symptoms"])
-		if non_diabetes_notes:
-			lines.append("Other health considerations: " + " ".join(non_diabetes_notes))
-
 		if info["unmatched_symptoms"]:
 			lines.append(
 				"Symptoms not typical for diabetes patterns were noted: "
 				+ ", ".join(info["unmatched_symptoms"][:6])
 				+ "."
 			)
+
+		if manual_text:
+			cleaned = manual_text.strip()
+			if cleaned:
+				lines.append(f"Manual notes: {cleaned}.")
 
 		return " ".join(lines).strip()
 

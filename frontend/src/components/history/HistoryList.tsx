@@ -5,9 +5,11 @@ import { SectionCard } from "../shared/SectionCard";
 interface HistoryListProps {
   reports?: HealthRecordResponse[];
   onReanalyze?: (recordId: number) => void;
+  onView?: (recordId: number) => void;
+  onDelete?: (recordId: number) => void;
 }
 
-export function HistoryList({ reports, onReanalyze }: HistoryListProps) {
+export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryListProps) {
   const [query, setQuery] = useState("");
   const [sortDir, setSortDir] = useState("desc");
 
@@ -68,7 +70,11 @@ export function HistoryList({ reports, onReanalyze }: HistoryListProps) {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600">
+              <button
+                type="button"
+                onClick={() => onView?.(report.id)}
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600"
+              >
                 View report
               </button>
               <button
@@ -78,7 +84,22 @@ export function HistoryList({ reports, onReanalyze }: HistoryListProps) {
               >
                 Re-analyze
               </button>
-              <button className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!onDelete) {
+                    return;
+                  }
+
+                  const confirmed = window.confirm(
+                    `Delete report #${report.id}? This cannot be undone.`,
+                  );
+                  if (confirmed) {
+                    onDelete(report.id);
+                  }
+                }}
+                className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600"
+              >
                 Delete
               </button>
             </div>

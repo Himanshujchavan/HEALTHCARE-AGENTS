@@ -19,7 +19,8 @@ from database.crud import (
     get_health_record,
     get_user_health_records,
     get_latest_health_record,
-    update_health_record_analysis
+    update_health_record_analysis,
+    delete_health_record
 )
 from schemas.health_schema import (
     HealthInput,
@@ -343,6 +344,55 @@ async def get_health_data_analysis(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve analysis"
+        )
+
+
+@router.delete("/health-data/{record_id}")
+async def delete_health_data(
+    record_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    DELETE /api/v1/health/health-data/{record_id}
+    
+    Delete a specific health record for the current user
+    """
+    try:
+        record = get_health_record(db, record_id)
+
+        if not record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Health record not found"
+            )
+
+        if record.user_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+
+        deleted = delete_health_record(db, record_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete health record"
+            )
+
+        return {
+            "status": "success",
+            "message": "Health record deleted",
+            "record_id": record_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting health record: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete health record"
         )
 
 

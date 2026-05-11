@@ -89,3 +89,14 @@ export const useReanalyzeRecord = () => {
     },
   });
 };
+
+export const useDeleteHealthRecord = () => {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (recordId: number) => healthApi.deleteHealthRecord(recordId),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["health", "records"] });
+      client.invalidateQueries({ queryKey: queryKeys.latest });
+    },
+  });
+};

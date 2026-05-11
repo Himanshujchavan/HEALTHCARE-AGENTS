@@ -908,9 +908,15 @@ class PimaModel:
                 self._model = saved["model"]
                 self._scaler = saved["scaler"]
                 self.metrics = saved["metrics"]
-                self._trained = True
-                logger.info("PimaModel loaded from cache")
-                return
+                if not hasattr(self._model, "multi_class"):
+                    logger.warning("Cached PimaModel missing 'multi_class' — retraining")
+                    self._model = None
+                    self._scaler = None
+                    self.metrics = {}
+                else:
+                    self._trained = True
+                    logger.info("PimaModel loaded from cache")
+                    return
             except Exception:
                 pass
 

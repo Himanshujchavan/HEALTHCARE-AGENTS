@@ -6,6 +6,7 @@ import {
   HealthRecordResponse,
   LatestRecordResponse,
   ReanalyzeResponse,
+  DeleteRecordResponse,
   UploadReportResponse,
 } from "../models/health";
 
@@ -79,6 +80,15 @@ export async function getLatestRecord(): Promise<LatestRecordResponse> {
 export async function reanalyzeRecord(recordId: number): Promise<ReanalyzeResponse> {
   const response = await http.post<ReanalyzeResponse>(
     `/api/v1/health/analyze/${recordId}`,
+  );
+  return response.data;
+}
+
+export async function deleteHealthRecord(
+  recordId: number,
+): Promise<DeleteRecordResponse> {
+  const response = await http.delete<DeleteRecordResponse>(
+    `/api/v1/health/health-data/${recordId}`,
   );
   return response.data;
 }

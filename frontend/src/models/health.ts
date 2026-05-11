@@ -86,3 +86,9 @@ export interface ReanalyzeResponse {
   alert?: boolean | null;
   report?: string | null;
 }
+
+export interface DeleteRecordResponse {
+  status: string;
+  message: string;
+  record_id: number;
+}
