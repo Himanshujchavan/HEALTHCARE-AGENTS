@@ -1351,6 +1351,11 @@ You MUST NOT change the top_hypothesis provided.
 You must treat it as FINAL from structured engine.
 Do not replace it with any new condition (e.g., hypoglycemia).
 
+You are ONLY allowed to use conditions from this list:
+{allowed_conditions}
+
+Do not introduce any new diagnosis outside this list.
+
 Be concise and clinically precise. Do not repeat lab values verbatim.
 Be clinically cautious. Do not over-escalate severity beyond structured risk signals. — give specific specialty referrals.
 Do not use markdown formatting, headers, or bullet symbols. Write in plain numbered sections only.
@@ -1501,6 +1506,10 @@ def analyze_symptoms(
         {"symptoms": all_symptoms_for_mapping}
     )
 
+    allowed_conditions = [
+    h["condition"] for h in symptom_map_result.get("condition_hypotheses", [])
+]
+
     # Patch total_symptoms_checked to reflect actual combined input count
     symptom_map_result["total_symptoms_checked"] = len(all_symptoms_for_mapping)
     symptom_map_result["text_derived_symptom_count"] = len(text_derived_symptoms)
@@ -1574,6 +1583,7 @@ def analyze_symptoms(
                     "unmatched_symptoms":  unmatched_text,
                     "pima_probability":    pima_prob_text,
                     "complication_summary": complication_summary_str,
+                    "allowed_conditions": ", ".join(allowed_conditions)
                 })
                 if llm_output:
                     high_terms = ["CRITICAL", "EMERGENCY", "LIFE THREATENING"]
@@ -1584,6 +1594,14 @@ def analyze_symptoms(
                             llm_output = ""
                 llm_output = _clean_llm_output(llm_output if isinstance(llm_output, str) else "")
                 if llm_output and len(llm_output.strip()) > 80:
+                     # 🛡️ POST LLM SAFETY FILTER (HALLUCINATION BLOCK)
+
+    # remove ONLY invalid hallucinated conditions
+                    for cond in ["hypoglycemia", "diabetes", "DKA", "neuropathy"]:
+                        if cond.lower() not in [c.lower() for c in allowed_conditions]:
+                            if cond.lower() in llm_output.lower():
+                                logger.warning(f"Removed unsupported diagnosis: {cond}")
+                                llm_output = llm_output.replace(cond, "")
                     reasoning = llm_output.strip()
                     model_used = REASONING_MODEL["id"]
                     logger.info(f"Reasoning via {REASONING_MODEL['name']}")
