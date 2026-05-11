@@ -395,54 +395,84 @@ def _rule_based_risk(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
     bmi = health_data.get("bmi", 0)
     age = health_data.get("age", 0)
 
-    score = 0
-
+    hba1c_score = 0.0
     if hba1c >= 6.5:
-        score += 3
+        hba1c_score = 1.0
         risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "High"})
         recommendations.append("Consult endocrinologist for diabetes management")
     elif hba1c >= 5.7:
-        score += 2
+        hba1c_score = 0.6
         risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "Medium"})
         recommendations.append("Monitor HbA1c every 3 months")
 
+    glucose_score = 0.0
     if glucose >= 126:
-        score += 3
+        glucose_score = 1.0
         risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "High"})
         recommendations.append("Regular fasting glucose monitoring recommended")
     elif glucose >= 100:
-        score += 2
+        glucose_score = 0.6
         risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "Medium"})
 
-    if bmi >= 30:
-        score += 2
+    bmi_score = 0.0
+    if bmi >= 40:
+        bmi_score = 1.0
+        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High"})
+        recommendations.append("Weight management program recommended")
+    elif bmi >= 35:
+        bmi_score = 0.85
+        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High"})
+        recommendations.append("Weight management program recommended")
+    elif bmi >= 30:
+        bmi_score = 0.7
         risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High"})
         recommendations.append("Weight management program recommended")
     elif bmi >= 25:
-        score += 1
+        bmi_score = 0.4
         risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "Medium"})
 
-    if age >= 45:
-        score += 1
+    age_score = 0.0
+    if age >= 65:
+        age_score = 0.8
         risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
+    elif age >= 55:
+        age_score = 0.6
+        risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
+    elif age >= 45:
+        age_score = 0.4
+        risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
+    elif age >= 35:
+        age_score = 0.2
 
     if not recommendations:
         recommendations.append("Maintain healthy lifestyle and regular checkups")
 
-    if score <= 1:
-        risk_level, prob = "Low", "15%"
-    elif score <= 3:
-        risk_level, prob = "Moderate", "40%"
-    elif score <= 5:
-        risk_level, prob = "High", "65%"
+    weighted_score = (
+        (hba1c_score * 0.35)
+        + (glucose_score * 0.35)
+        + (bmi_score * 0.2)
+        + (age_score * 0.1)
+    )
+    risk_score = int(round(weighted_score * 100))
+
+    if risk_score <= 20:
+        risk_level = "Low"
+    elif risk_score <= 40:
+        risk_level = "Moderate"
+    elif risk_score <= 60:
+        risk_level = "High"
     else:
-        risk_level, prob = "Critical", "85%"
+        risk_level = "Critical"
+
+    risk_probability = round(risk_score / 100.0, 2)
+    risk_percentage = f"{risk_score}%"
 
     return {
         "risk_level": risk_level,
-        "risk_probability": prob,
-        "risk_percentage": prob,
+        "risk_probability": risk_probability,
+        "risk_percentage": risk_percentage,
         "prediction_method": "rule_based",
+        "risk_score": risk_score,
         "risk_factors": risk_factors,
         "recommendations": recommendations,
     }

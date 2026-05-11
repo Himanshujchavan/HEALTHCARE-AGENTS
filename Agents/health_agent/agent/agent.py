@@ -36,12 +36,13 @@ SAFETY RULES:
     agent = create_tool_calling_agent(llm=llm, tools=tools, prompt=prompt)
     memory = create_memory()
 
-    executor = AgentExecutor( 
-        agent=agent, 
+    executor = AgentExecutor(
+        agent=agent,
         tools=tools,
         memory=memory,
-        verbose=True,           
+        verbose=True,
         max_iterations=8,
-        handle_parsing_errors=True
+        handle_parsing_errors=True,
+        return_intermediate_steps=True,
     )
     return executor

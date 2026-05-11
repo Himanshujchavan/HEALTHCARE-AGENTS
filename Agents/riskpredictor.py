@@ -89,6 +89,106 @@ def _parse_risk_level(text: str) -> Optional[str]:
     return None
 
 
+def _parse_risk_level_from_steps(steps: Optional[list]) -> Optional[str]:
+    """
+    Extract risk level from agent intermediate tool outputs (if available).
+    """
+    if not steps:
+        return None
+    for step in steps:
+        if not isinstance(step, (list, tuple)) or len(step) != 2:
+            continue
+        action, observation = step
+        tool_name = getattr(action, "tool", "")
+        if tool_name == "assess_risk":
+            level = _parse_risk_level(str(observation))
+            if level:
+                return level
+    return None
+
+
+def _extract_lab_values(analysis: dict) -> dict:
+    """Extract core lab values from analyzer output or flat input."""
+    values = {}
+    params = analysis.get("parameters") or {}
+
+    for key in ("hba1c", "glucose", "bmi", "age"):
+        direct = analysis.get(key)
+        if isinstance(direct, (int, float)):
+            values[key] = direct
+
+        param = params.get(key) or {}
+        val = param.get("value")
+        if isinstance(val, (int, float)):
+            values[key] = val
+
+    return values
+
+
+def _compute_lab_risk(values: dict) -> dict:
+    """Compute a lab-based risk score consistent with the master workflow."""
+    hba1c = float(values.get("hba1c", 0) or 0)
+    glucose = float(values.get("glucose", 0) or 0)
+    bmi = float(values.get("bmi", 0) or 0)
+    age = float(values.get("age", 0) or 0)
+
+    hba1c_score = 0.0
+    if hba1c >= 6.5:
+        hba1c_score = 1.0
+    elif hba1c >= 5.7:
+        hba1c_score = 0.6
+
+    glucose_score = 0.0
+    if glucose >= 126:
+        glucose_score = 1.0
+    elif glucose >= 100:
+        glucose_score = 0.6
+
+    bmi_score = 0.0
+    if bmi >= 40:
+        bmi_score = 1.0
+    elif bmi >= 35:
+        bmi_score = 0.85
+    elif bmi >= 30:
+        bmi_score = 0.7
+    elif bmi >= 25:
+        bmi_score = 0.4
+
+    age_score = 0.0
+    if age >= 65:
+        age_score = 0.8
+    elif age >= 55:
+        age_score = 0.6
+    elif age >= 45:
+        age_score = 0.4
+    elif age >= 35:
+        age_score = 0.2
+
+    weighted_score = (
+        (hba1c_score * 0.35)
+        + (glucose_score * 0.35)
+        + (bmi_score * 0.2)
+        + (age_score * 0.1)
+    )
+    risk_score = int(round(weighted_score * 100))
+
+    if risk_score <= 20:
+        risk_level = "LOW"
+    elif risk_score <= 40:
+        risk_level = "MEDIUM"
+    elif risk_score <= 60:
+        risk_level = "HIGH"
+    else:
+        risk_level = "CRITICAL"
+
+    return {
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "risk_probability": round(risk_score / 100.0, 2),
+        "summary": f"Lab-based risk assessment: {risk_level} (Score: {risk_score}%).",
+    }
+
+
 def _level_to_probability(level: Optional[str]) -> float:
     """
     Map a risk level string to a probability float.
@@ -137,6 +237,19 @@ def _build_message_from_analysis(analysis: dict) -> str:
     elif isinstance(comorbidities, str) and comorbidities:
         parts.append(f"Comorbidities: {comorbidities}")
 
+    lab_values = _extract_lab_values(analysis)
+    lab_parts = []
+    if "hba1c" in lab_values:
+        lab_parts.append(f"HbA1c {lab_values['hba1c']}%")
+    if "glucose" in lab_values:
+        lab_parts.append(f"Glucose {lab_values['glucose']} mg/dL")
+    if "bmi" in lab_values:
+        lab_parts.append(f"BMI {lab_values['bmi']}")
+    if "age" in lab_values:
+        lab_parts.append(f"Age {lab_values['age']}")
+    if lab_parts:
+        parts.append("Lab values: " + ", ".join(lab_parts))
+
     # Fallback — if nothing recognisable, pass the raw dict as context
     if not parts:
         parts.append(f"Patient analysis data: {json.dumps(analysis)}")
@@ -180,10 +293,23 @@ class RiskPredictorAgent:
         logger.info(f"[RiskPredictorAgent] Built message from analysis: {message}")
 
         result = run_risk_assessment(message)
+        lab_values = _extract_lab_values(analysis)
+        lab_risk = None
+
+        if result["risk_level"] is None and lab_values:
+            lab_risk = _compute_lab_risk(lab_values)
+            result["risk_level"] = lab_risk["risk_level"]
+            result["success"] = True
+            result["error"] = None
+
+            if result.get("response"):
+                result["response"] = f"{result['response']}\n\n{lab_risk['summary']}"
+            else:
+                result["response"] = lab_risk["summary"]
 
         output = {
             "risk_level":       result["risk_level"],
-            "risk_probability": _level_to_probability(result["risk_level"]),
+            "risk_probability": lab_risk["risk_probability"] if lab_risk else _level_to_probability(result["risk_level"]),
             "response":         result["response"],
             "success":          result["success"],
             "error":            result["error"],
@@ -224,8 +350,14 @@ def run_risk_assessment(message: str, session_id: Optional[str] = None) -> dict:
 
     try:
         result = agent.invoke({"input": message})
-        output = result["output"]
+        output = result.get("output", "")
         risk_level = _parse_risk_level(output)
+
+        if not risk_level:
+            risk_level = _parse_risk_level_from_steps(result.get("intermediate_steps"))
+
+        success = risk_level is not None
+        error = None if success else "Risk level not found in agent output"
 
         logger.info(f"[RiskPredictor] Session {session_id} | Risk: {risk_level}")
 
@@ -233,8 +365,8 @@ def run_risk_assessment(message: str, session_id: Optional[str] = None) -> dict:
             "session_id": session_id,
             "response":   output,
             "risk_level": risk_level,
-            "success":    True,
-            "error":      None,
+            "success":    success,
+            "error":      error,
         }
 
     except Exception as e:
