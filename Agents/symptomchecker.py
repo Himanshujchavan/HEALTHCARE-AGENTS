@@ -1597,19 +1597,25 @@ def analyze_symptoms(
     if manual_text:    sources_used.append("ManualText")
     if symptoms:       sources_used.append("SymptomCheckboxes")
     
-    ml_risk = pima_result.get("risk_level") if pima_result else "Low"
+    ml_risk = (
+    pima_result.get("risk_level")
+    if isinstance(pima_result, dict) and pima_result.get("risk_level")
+    else "Low"
+)
     comp_risk = complication_result.get("overall_complication_risk", "Low")
     sym_risk = symptom_map_result.get("top_hypothesis", "")
 
     risk_levels = {"Low": 1, "Moderate": 2, "High": 3, "Critical": 4}
 
     final_score = max(
-        risk_levels.get(ml_risk, 1),
-        risk_levels.get(comp_risk, 1),
-        3 if "Cardiovascular Risk" in comp_risk else 1
-    )
+    risk_levels.get(ml_risk, 1),
+    risk_levels.get(comp_risk, 1),
+)
+    final_score = min(max(final_score, 1), 4)
 
     final_risk = {1: "Low", 2: "Moderate", 3: "High", 4: "Critical"}[final_score]
+
+    structured_risk = complication_result.get("overall_complication_risk", "Low")
 
     return {
         "symptom_mapping":      symptom_map_result,
@@ -1619,6 +1625,7 @@ def analyze_symptoms(
         "reasoning":            reasoning,
         "model_used":           model_used,
         "final_risk_level": final_risk,
+        "structured_risk":      structured_risk,
         "input_summary": {
             "symptoms_count":            len(all_symptoms_for_mapping),
             "checkbox_symptoms_count":   len(symptoms),
