@@ -646,7 +646,15 @@ async def reanalyze_record(
             "age": record.age
         }
 
-        workflow_result = master_agent.process_health_data(health_data_dict)
+        # Restore symptoms and manual text from DB for consistent re-analysis
+        symptoms = json.loads(record.symptoms) if record.symptoms else []
+        manual_text = record.manual_text
+
+        workflow_result = master_agent.process_health_data(
+            health_data=health_data_dict,
+            symptoms=symptoms,
+            manual_text=manual_text
+        )
         update_health_record_analysis(db, record.id, json.dumps(workflow_result))
         
         logger.info(f"Record {record_id} re-analyzed successfully")

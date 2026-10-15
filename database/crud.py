@@ -53,12 +53,14 @@ def create_health_record(db: Session, user_id: int, data: HealthInput) -> Health
         hba1c=data.hba1c,
         glucose=data.glucose,
         bmi=data.bmi,
-        age=data.age
+        age=data.age,
+        symptoms=json.dumps(data.symptoms) if data.symptoms else None,
+        manual_text=data.manual_text
     )
     db.add(record)
     db.commit()
     db.refresh(record)
-    
+
     logger.info(f"Health record created: ID={record.id}, User={user_id}")
     return record
 

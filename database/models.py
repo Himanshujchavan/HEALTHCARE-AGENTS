@@ -38,6 +38,11 @@ class HealthRecord(Base):
     glucose = Column(Float, nullable=False)
     bmi = Column(Float, nullable=False)
     age = Column(Integer, nullable=False)
+
+    # Added for Phase 0: ensure re-analysis consistency
+    symptoms = Column(String, nullable=True)      # Store as JSON string
+    manual_text = Column(String, nullable=True)
+
     
     # Additional fields
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

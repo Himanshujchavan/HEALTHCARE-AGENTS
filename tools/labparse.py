@@ -37,7 +37,7 @@ class LabReportParser:
     Uses both regex extraction and LLM-based parsing
     """
     
-    def __init__(self, llm_model: str = "mistral", use_llm: bool = True):
+    def __init__(self, llm_model: str = "qwen2.5:3b", use_llm: bool = True):
         """
         Initialize the parser
         

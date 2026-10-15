@@ -1461,6 +1461,7 @@ def analyze_symptoms(
     report_context: Optional[Dict] = None,
     manual_text:    Optional[str]  = None,
     use_llm:        bool           = True,
+    risk_context:   Optional[Dict] = None,
 ) -> Dict[str, Any]:
     """
     Run the full diabetes + complication symptom analysis pipeline.

@@ -61,31 +61,24 @@ SUPPLEMENTAL_RANGES = {
 #  STEP 2 — Validation Function
 # ══════════════════════════════════════════════════════════════════════════════
 
-def validate_parameters(data: dict) -> dict:
+def validate_parameters(data: dict, plugin=None) -> dict:
     """
     Validate health parameters against reference ranges.
 
     Args:
         data: e.g. {"hba1c": 6.8, "glucose": 148, "bmi": 29, "age": 45}
-
-    Returns:
-        {
-          "parameters": {
-                        "hba1c":   {"value": 6.8, "status": "High", "unit": "%", "note": "Diabetic range (ADA 6.5%+)"},
-                        "glucose": {"value": 148, "status": "High", "unit": "mg/dL", "note": "FPG diabetes criterion (≥126 mg/dL)"},
-            ...
-          },
-          "abnormal_count": 3,
-                    "abnormal_parameters": ["hba1c", "glucose", "bmi"],
-                    "endocrine_flags": ["DIABETES CRITERIA MET", "INSULIN RESISTANCE"]
-        }
+        plugin: Optional DiseasePlugin for custom ranges and flags.
     """
+    if plugin is None:
+        from Agents.plugins.diabetes import DiabetesPlugin
+        plugin = DiabetesPlugin()
+
     results = {}
     abnormal = 0
     abnormal_params = []
 
     for k, v in data.items():
-        r = REFERENCE_RANGES.get(k) or SUPPLEMENTAL_RANGES.get(k)
+        r = plugin.reference_ranges.get(k)
 
         if not r:
             results[k] = {
@@ -111,17 +104,10 @@ def validate_parameters(data: dict) -> dict:
             "value": v,
             "status": status,
             "unit": UNITS.get(k, r.get("unit", "")),
-            "note": NOTES.get((k, status), ""),
+            "note": plugin.note(k, status),
         }
 
-    flags = []
-    hba1c_val = data.get("hba1c")
-    if isinstance(hba1c_val, (int, float)) and hba1c_val >= 6.5:
-        flags.append("DIABETES CRITERIA MET")
-
-    homa_ir_val = data.get("homa_ir")
-    if isinstance(homa_ir_val, (int, float)) and homa_ir_val > 2.5:
-        flags.append("INSULIN RESISTANCE")
+    flags = plugin.flags(data, results)
 
     return {
         "parameters": results,
@@ -136,7 +122,7 @@ def validate_parameters(data: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @tool
-def analyze_lab_values(data: dict) -> dict:
+def analyze_lab_values(data: dict, plugin=None) -> dict:
     """
     Analyze health lab values and detect abnormalities.
 
@@ -145,11 +131,9 @@ def analyze_lab_values(data: dict) -> dict:
 
     Args:
         data: Health parameters, e.g. {"hba1c": 6.8, "glucose": 148, "bmi": 29, "age": 45}
-
-    Returns:
-        Analysis result with parameter statuses and abnormal count.
+        plugin: Optional DiseasePlugin for custom ranges and flags.
     """
-    return validate_parameters(data)
+    return validate_parameters(data, plugin=plugin)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -162,10 +146,10 @@ def create_analyzer_agent():
     return None
 
 
-def analyze_with_langgraph_agent(data: Dict[str, float]) -> Dict[str, Any]:
+def analyze_with_langgraph_agent(data: Dict[str, float], plugin=None) -> Dict[str, Any]:
     """LLM analyzer disabled; return rule-based validation output."""
     logger.info("LLM analyzer disabled; using rule-based validation.")
-    return validate_parameters(data)
+    return validate_parameters(data, plugin=plugin)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -183,21 +167,20 @@ class ReportAnalyzerAgent:
         self.reference_ranges = REFERENCE_RANGES
         logger.info("Report Analyzer Agent initialized")
 
-    def analyze_health_record(self, health_data: Dict[str, float], use_agent: bool = False) -> str:
+    def analyze_health_record(self, health_data: Dict[str, float], use_agent: bool = False, plugin=None) -> str:
         """
         Main analysis method — returns a JSON string.
 
         Args:
             health_data: {"hba1c": 7.8, "glucose": 148, "bmi": 29, "age": 45}
-
-        Returns:
-            JSON string of analysis result
+            use_agent: Whether to use LLM analyzer (currently disabled)
+            plugin: Optional DiseasePlugin for custom ranges and flags.
         """
         try:
             logger.info("Starting health record analysis")
             if use_agent:
                 logger.info("use_agent requested, but LLM analyzer is disabled; using rule-based validation")
-            result = validate_parameters(health_data)
+            result = validate_parameters(health_data, plugin=plugin)
             result["analysis_timestamp"] = str(datetime.now())
             result["analyzer_version"] = "2.0"
             logger.info("Analysis completed successfully")

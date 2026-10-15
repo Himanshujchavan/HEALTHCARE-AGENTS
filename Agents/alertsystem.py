@@ -38,9 +38,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AlertThresholds:
-	diabetes_probability: float = 0.70
-	hba1c: float = 7.0
-	abnormal_parameters: int = 3
+    """Default alert thresholds. In a multi-disease system, these would be
+    provided by the active DiseasePlugin.
+    """
+    probability: float = 0.70
+    hba1c: float = 7.0
+    abnormal_parameters: int = 3
 
 
 class AlertAgent:

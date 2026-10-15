@@ -504,13 +504,13 @@ Some agents attempt to use local Ollama models. If the model is unavailable or t
 
 Examples used in the codebase:
 
-- `mistral`
+- `qwen2.5:3b`
 - `deepseek-r1:8b`
 
 Example Ollama commands:
 
 ```powershell
-ollama pull mistral
+ollama pull qwen2.5:3b
 ollama pull deepseek-r1:8b
 ```
 
