@@ -531,7 +531,7 @@ def trend_analysis_node(state: HealthWorkflowState) -> dict:
         # Stub: Actual logic will be implemented in Step E
         return {
             "trend_result": {"status": "stubbed", "trend": "stable"},
-            "steps": {**state["steps"], "trend_analysis": {"status": "completed", "result": "stubbed"}}
+            "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": "stubbed"}}
         }
     except Exception as e:
         logger.error(f"Trend analysis failed: {e}")
@@ -544,7 +544,7 @@ def differential_analysis_node(state: HealthWorkflowState) -> dict:
         # Stub: Actual logic will be implemented in Step E
         return {
             "differential_result": {"status": "stubbed", "hypothesis": "primary disease"},
-            "steps": {**state["steps"], "differential_analysis": {"status": "completed", "result": "stubbed"}}
+            "steps": {**state["steps"], "5c_differential_analysis": {"status": "completed", "result": "stubbed"}}
         }
     except Exception as e:
         logger.error(f"Differential analysis failed: {e}")
@@ -557,7 +557,7 @@ def explanation_node(state: HealthWorkflowState) -> dict:
         # Stub: Actual logic will be implemented in Step E
         return {
             "explanation": "Assessment based on combined lab and symptom signals.",
-            "steps": {**state["steps"], "explanation_generation": {"status": "completed"}}
+            "steps": {**state["steps"], "6b_explanation_generation": {"status": "completed"}}
         }
     except Exception as e:
         logger.error(f"Explanation generation failed: {e}")
@@ -826,7 +826,8 @@ class MasterHealthAgent:
                             use_llm: bool = False,
                             include_risk: bool = True,
                             include_symptom: bool = True,
-                            include_alert: bool = True) -> Dict[str, Any]:
+                            include_alert: bool = True,
+                            history: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Process health data through the LangGraph workflow.
 
@@ -834,6 +835,7 @@ class MasterHealthAgent:
             health_data: {"hba1c": 6.8, "glucose": 148, "bmi": 29, "age": 45}
             symptoms: ["fatigue", "frequent urination"]
             include_risk: Whether to include risk prediction step
+            history: Historical health records for trend analysis
         """
         payload = dict(health_data)
         extracted_symptoms = symptoms
@@ -864,6 +866,11 @@ class MasterHealthAgent:
             "steps": {},
             "timestamp": str(datetime.now()),
             "input_file": None,
+            "disease_results": {},
+            "history": history,
+            "trend_result": None,
+            "differential_result": None,
+            "explanation": None,
         }
 
         result = self.workflow.invoke(initial_state)
@@ -880,6 +887,10 @@ class MasterHealthAgent:
                 "alert": result["alert_result"].get("alert"),
                 "report": result["alert_result"].get("report"),
             } if result.get("alert_result") else {}),
+            **({"disease_results": result.get("disease_results")},
+            **({"trend_result": result.get("trend_result")},
+            **({"differential_result": result.get("differential_result")},
+            **({"explanation": result.get("explanation")},
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
@@ -891,7 +902,8 @@ class MasterHealthAgent:
                            manual_text: Optional[str] = None,
                            include_risk: bool = True,
                            include_symptom: bool = True,
-                           include_alert: bool = True) -> Dict[str, Any]:
+                           include_alert: bool = True,
+                           history: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Process a PDF lab report through the LangGraph workflow.
 
@@ -899,6 +911,7 @@ class MasterHealthAgent:
             pdf_path: Path to the PDF file
             use_llm: Use LLM for PDF text extraction
             include_risk: Whether to include risk prediction step
+            history: Historical health records for trend analysis
         """
         initial_state: HealthWorkflowState = {
             "health_data": {},
@@ -920,6 +933,11 @@ class MasterHealthAgent:
             "steps": {},
             "timestamp": str(datetime.now()),
             "input_file": Path(pdf_path).name,
+            "disease_results": {},
+            "history": history,
+            "trend_result": None,
+            "differential_result": None,
+            "explanation": None,
         }
 
         result = self.workflow.invoke(initial_state)
@@ -938,6 +956,10 @@ class MasterHealthAgent:
                 "alert": result["alert_result"].get("alert"),
                 "report": result["alert_result"].get("report"),
             } if result.get("alert_result") else {}),
+            **({"disease_results": result.get("disease_results")},
+            **({"trend_result": result.get("trend_result")},
+            **({"differential_result": result.get("differential_result")},
+            **({"explanation": result.get("explanation")},
             **({"error": result["error"]} if result.get("error") else {}),
         }
 

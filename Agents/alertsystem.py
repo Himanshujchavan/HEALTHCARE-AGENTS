@@ -42,8 +42,9 @@ class AlertThresholds:
     provided by the active DiseasePlugin.
     """
     probability: float = 0.70
-    hba1c: float = 7.0
+    symptom_score: float = 0.60
     abnormal_parameters: int = 3
+    # Parameter-specific thresholds are now handled via plugin.param_alert_thresholds
 
 
 class AlertAgent:
