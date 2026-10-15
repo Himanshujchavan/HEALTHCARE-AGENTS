@@ -154,9 +154,11 @@ Add a `_route_after_*` function per new node with the same `failed → finalize`
 
 ## Phase 6 — Explainability Agent + Alert fixes (≈ 1 day)
 
-- [ ] `Agents/explainer.py`: template explanation built from `final_assessment["components"]`, `trend_result`, and alert triggers, e.g. *"Score 0.71 (High): risk model 0.30, abnormal labs 0.30, symptoms 0.05, trend 0.06."* Optional Qwen paraphrase constrained to those numbers; always fall back to the template.
-- [ ] Store in `final_assessment["explanation"]` and include it in the alert report.
-- [ ] `alertsystem.py`: read thresholds from the plugin; extract fields by disease instead of `hba1c` only (`_extract_metrics`, `:126`); add `symptom_score` as a standalone trigger (closes the gap in your report §4.4.2).
+- [x] `Agents/explainer.py`: template explanation built from `final_assessment["components"]`, `trend_result`, and alert triggers, e.g. *"Score 0.71 (High): risk model 0.30, abnormal labs 0.30, symptoms 0.05, trend 0.06."* Optional Qwen paraphrase constrained to those numbers; always fall back to the template.
+- [x] Store in `final_assessment["explanation"]` and include it in the alert report.
+- [x] `alertsystem.py`: read thresholds from the plugin; extract fields by disease instead of `hba1c` only (`_extract_metrics`, `:126`); add `symptom_score` as a standalone trigger (closes the gap in your report §4.4.2).
+- [x] **Fix Risk Level Mismatch:** Update `_evaluate_risk` to use `result["risk_level"]` if provided, ensuring alignment between fusion score and alert level.
+- [x] **Disease-Neutral Wording:** Update reports and LLM context to use the actual disease name instead of hardcoded "diabetes".
 
 ---
 
