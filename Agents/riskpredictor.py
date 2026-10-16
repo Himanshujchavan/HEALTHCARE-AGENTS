@@ -2,8 +2,11 @@
 Risk Predictor Agent — LangChain Implementation
 
 Purpose:
-    Checks patient-reported symptoms, assesses health risk level,
-    and recommends the appropriate care pathway.
+    Diabetes risk-prediction component in the multi-disease health workflow.
+    It retains conversational symptom assessment and exposes a reusable
+    diabetes rule scorer for the Disease Registry. Cardiovascular scoring,
+    longitudinal trends, differential analysis, and explanations belong to
+    their dedicated plugins/agents in the major-project architecture.
 
 Steps:
     1. Collect symptoms, age, severity (1-10), duration, comorbidities via conversation
@@ -108,21 +111,68 @@ def _parse_risk_level_from_steps(steps: Optional[list]) -> Optional[str]:
 
 
 def _extract_lab_values(analysis: dict) -> dict:
-    """Extract core lab values from analyzer output or flat input."""
+    """Extract diabetes-related values from flat or analyzer-style input.
+
+    Accepts both ``age`` and ``patient_age`` and parameter objects such as
+    ``{"hba1c": {"value": 6.8}}``. Cardiovascular fields are intentionally
+    handled by the cardiovascular plugin, not this diabetes scorer.
+    """
     values = {}
     params = analysis.get("parameters") or {}
 
     for key in ("hba1c", "glucose", "bmi", "age"):
         direct = analysis.get(key)
-        if isinstance(direct, (int, float)):
+        if key == "age" and direct is None:
+            direct = analysis.get("patient_age")
+
+        if isinstance(direct, (int, float)) and not isinstance(direct, bool):
             values[key] = direct
 
         param = params.get(key) or {}
-        val = param.get("value")
-        if isinstance(val, (int, float)):
+        val = param.get("value") if isinstance(param, dict) else None
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
             values[key] = val
 
     return values
+
+
+def has_diabetes_risk_inputs(values: dict) -> bool:
+    """Return True when at least one diabetes marker is available.
+
+    Age alone is not enough to run the diabetes lab fallback. This prevents
+    an incomplete cardiovascular-only submission from being scored as
+    diabetes risk using zero-filled lab values.
+    """
+    return any(values.get(key) is not None for key in ("hba1c", "glucose", "bmi"))
+
+
+def compute_diabetes_rule_risk(data: dict, analysis: Optional[dict] = None) -> dict:
+    """Public rule-risk entry point for ``DiabetesPlugin.rule_risk()``.
+
+    The Disease Registry can call this adapter without moving or duplicating
+    the existing diabetes scoring logic. ``data`` may be flat health data;
+    ``analysis`` may contain report-analyzer output. Existing scoring weights
+    and thresholds remain unchanged.
+    """
+    combined = {}
+    if isinstance(analysis, dict):
+        combined.update(analysis)
+    if isinstance(data, dict):
+        combined.update(data)
+
+    values = _extract_lab_values(combined)
+    if not has_diabetes_risk_inputs(values):
+        return {
+            "risk_level": None,
+            "risk_score": None,
+            "risk_probability": None,
+            "summary": "Insufficient diabetes-related values for rule-based risk scoring.",
+            "success": False,
+        }
+
+    result = _compute_lab_risk(values)
+    result["success"] = True
+    return result
 
 
 def _compute_lab_risk(values: dict) -> dict:
@@ -296,7 +346,7 @@ class RiskPredictorAgent:
         lab_values = _extract_lab_values(analysis)
         lab_risk = None
 
-        if result["risk_level"] is None and lab_values:
+        if result["risk_level"] is None and has_diabetes_risk_inputs(lab_values):
             lab_risk = _compute_lab_risk(lab_values)
             result["risk_level"] = lab_risk["risk_level"]
             result["success"] = True
