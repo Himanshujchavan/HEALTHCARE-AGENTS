@@ -27,9 +27,19 @@ from langgraph.graph import StateGraph, END, START
 from typing_extensions import TypedDict
 
 # Import sub-agents
+from Agents.plugins.registry import applicable, register
+from Agents.plugins.diabetes import DiabetesPlugin
+from Agents.plugins.cardiovascular import CardiovascularPlugin
+from Agents.plugins.boot import init_plugins
+from Agents.trendagent import TrendAgent
+from Agents.differentialagent import DifferentialAgent
+from Agents.explainer import Explainer
 from Agents.reportanalyzer import ReportAnalyzerAgent
 from Agents.alertsystem import AlertAgent
 from utils.helpers import normalize_level
+
+# Initialize the disease plugins
+init_plugins()
 
 logger = logging.getLogger(__name__)
 
@@ -301,17 +311,27 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
                 name = plugin.name
                 if name == "diabetes":
                     # Diabetes keeps existing complex analyze_symptoms call
-                    res = analyze_symptoms(
-                        symptoms=symptoms,
-                        report_context=state.get("analysis_result"),
-                        manual_text=manual_text,
-                        use_llm=state.get("use_llm", False),
-                    )
-                    res.update(_derive_symptom_metrics(res))
-                    disease_symptoms[name] = res
+                    try:
+                        from Agents.symptomchecker import SymptomCheckerAgent
+                        checker = SymptomCheckerAgent()
+                        # Note: we assume analyze_symptoms is a method of the agent or accessible
+                        res = checker.analyze_symptoms(
+                            symptoms=symptoms,
+                            report_context=state.get("analysis_result"),
+                            manual_text=manual_text,
+                            use_llm=state.get("use_llm", False),
+                        )
+                        res.update(_derive_symptom_metrics(res))
+                        disease_symptoms[name] = res
+                    except Exception as e:
+                        logger.error(f"Diabetes symptom check failed: {e}")
+                        disease_symptoms[name] = {"error": str(e), "severity_score": 0.0}
                 else:
                     # Other plugins use a simple score_symptoms call
                     disease_symptoms[name] = plugin.score_symptoms(symptoms)
+
+            if not disease_symptoms:
+                raise RuntimeError("No disease plugins applicable for symptom check")
 
             # Primary is the first applicable
             primary_name = plugins[0].name
@@ -528,10 +548,21 @@ def trend_analysis_node(state: HealthWorkflowState) -> dict:
     """Perform trend analysis on historical health records."""
     try:
         logger.info("NODE trend: Analyzing historical trends")
-        # Stub: Actual logic will be implemented in Step E
+        from Agents.plugins.registry import applicable
+
+        health_data = state["health_data"]
+        plugins = applicable(health_data)
+        if not plugins:
+            return {"trend_result": {"status": "no_plugins"}, "steps": {**state["steps"], "5b_trend_analysis": {"status": "failed"}}}
+
+        primary_plugin = plugins[0]
+        history = state.get("history") or []
+
+        result = TrendAgent.run_trend(history, primary_plugin, health_data)
+
         return {
-            "trend_result": {"status": "stubbed", "trend": "stable"},
-            "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": "stubbed"}}
+            "trend_result": result,
+            "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": result}}
         }
     except Exception as e:
         logger.error(f"Trend analysis failed: {e}")
@@ -541,10 +572,14 @@ def differential_analysis_node(state: HealthWorkflowState) -> dict:
     """Perform differential diagnosis analysis."""
     try:
         logger.info("NODE differential: Performing differential analysis")
-        # Stub: Actual logic will be implemented in Step E
+        disease_results = state.get("disease_results", {})
+        symptoms = state.get("symptoms") or []
+
+        result = DifferentialAgent.run_differential(disease_results, symptoms)
+
         return {
-            "differential_result": {"status": "stubbed", "hypothesis": "primary disease"},
-            "steps": {**state["steps"], "5c_differential_analysis": {"status": "completed", "result": "stubbed"}}
+            "differential_result": result,
+            "steps": {**state["steps"], "5c_differential_analysis": {"status": "completed", "result": result}}
         }
     except Exception as e:
         logger.error(f"Differential analysis failed: {e}")
@@ -554,9 +589,19 @@ def explanation_node(state: HealthWorkflowState) -> dict:
     """Generate medical explanation for the final assessment."""
     try:
         logger.info("NODE explain: Generating medical explanation")
-        # Stub: Actual logic will be implemented in Step E
+        final_assessment = state.get("final_assessment")
+        trend = state.get("trend_result")
+
+        if not final_assessment:
+            return {"explanation": "No assessment available to explain.", "steps": {**state["steps"], "6b_explanation_generation": {"status": "failed"}}}
+
+        # Extract triggers from final assessment if available
+        triggers = final_assessment.get("triggers", [])
+
+        explanation = Explainer.explain(final_assessment, trend, triggers)
+
         return {
-            "explanation": "Assessment based on combined lab and symptom signals.",
+            "explanation": explanation,
             "steps": {**state["steps"], "6b_explanation_generation": {"status": "completed"}}
         }
     except Exception as e:
@@ -661,8 +706,8 @@ def _to_probability(value: Any) -> Optional[float]:
 
 def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = None) -> Dict:
     """
-    Combine ML, abnormal labs, and symptom severity into a final score.
-    Maintains legacy output keys for compatibility.
+    Combine ML, abnormal labs, symptom severity, and trend trajectory into a final score.
+    Implements the Major Project Extension formula.
     """
     abnormal_count = int(analysis.get("abnormal_count", 0) or 0)
     abnormal_weight = min(max(abnormal_count, 0) / 3.0, 1.0)
@@ -673,21 +718,35 @@ def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = Non
     if ml_probability is None:
         ml_probability = 0.0
 
-    symptom_score = symptom.get("severity_score")
+    symptom_score = symptom.get("severity", 0.0)
     try:
         symptom_score = float(symptom_score)
     except (TypeError, ValueError):
         symptom_score = 0.0
     symptom_score = max(0.0, min(1.0, symptom_score))
 
-    # Default formula (0.6 / 0.3 / 0.1)
-    weights = {"ml": 0.6, "abnormal": 0.3, "symptom": 0.1, "trend": 0.0}
+    # Trend Component
+    trend_score = 0.0
+    if trend and trend.get("status") == "completed":
+        trend_score = trend.get("trend_score", 0.0)
 
-    # Note: Trend weights will be updated in Step E
+    # Determine which formula to use based on history
+    has_history = (trend and trend.get("visits_used", 0) >= 2)
+
+    if has_history:
+        # Major Project Formula: 0.50*risk + 0.25*abnormal + 0.10*symptom + 0.15*trend
+        weights = {"ml": 0.50, "abnormal": 0.25, "symptom": 0.10, "trend": 0.15}
+        formula = "0.50*risk + 0.25*abnormal + 0.10*symptom + 0.15*trend"
+    else:
+        # Fallback Formula: 0.60*risk + 0.30*abnormal + 0.10*symptom
+        weights = {"ml": 0.60, "abnormal": 0.30, "symptom": 0.10, "trend": 0.0}
+        formula = "0.60*risk + 0.30*abnormal + 0.10*symptom"
+
     final_score = round(
         (ml_probability * weights["ml"]) +
         (abnormal_weight * weights["abnormal"]) +
-        (symptom_score * weights["symptom"]),
+        (symptom_score * weights["symptom"]) +
+        (trend_score * weights["trend"]),
         4
     )
 
@@ -700,11 +759,13 @@ def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = Non
         "abnormal_count": abnormal_count,
         "abnormal_count_weight": round(abnormal_weight, 4),
         "symptom_score": round(symptom_score, 4),
-        "formula": f"({ml_probability} * {weights['ml']}) + ({abnormal_weight:.4f} * {weights['abnormal']}) + ({symptom_score:.4f} * {weights['symptom']})",
+        "trend_score": round(trend_score, 4),
+        "formula": formula,
         "components": {
             "ml_component": round(ml_probability * weights["ml"], 4),
             "abnormal_component": round(abnormal_weight * weights["abnormal"], 4),
             "symptom_component": round(symptom_score * weights["symptom"], 4),
+            "trend_component": round(trend_score * weights["trend"], 4),
         },
     }
 

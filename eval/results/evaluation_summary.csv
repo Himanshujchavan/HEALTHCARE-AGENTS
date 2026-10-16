@@ -1,0 +1,5 @@
+config,accuracy,precision,recall,f1,auc
+Rule-Only,0.9,1.0,0.8,0.8888888888888888,1.0
+ML-Only,1.0,1.0,1.0,1.0,1.0
+Hybrid,1.0,1.0,1.0,1.0,1.0
+LLM-Only,0.6,0.6,0.6,0.6,0.48

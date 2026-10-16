@@ -1,30 +1,41 @@
-from typing import Protocol, List, Dict, Any
+from typing import List, Dict, Any, Optional, Protocol
+from abc import ABC, abstractmethod
 
-class DiseasePlugin:
+class DiseasePlugin(ABC):
+    """
+    Base class for all disease-specific plugins.
+    Each plugin encapsulates the clinical logic for a specific condition.
+    """
+
     name: str
     required_fields: List[str]
     optional_fields: List[str]
-    reference_ranges: Dict[str, Any]
-    param_alert_thresholds: Dict[str, float]      # e.g. {"hba1c": 7.0}
-    trend_scales: Dict[str, float]                # param -> delta counting as a full trend
+    reference_ranges: Dict[str, Dict[str, Any]]
+    trend_scales: Dict[str, float]
     symptom_profiles: Dict[str, Any]
+    alert_thresholds: Dict[str, float]
 
+    @abstractmethod
     def flags(self, data: Dict[str, Any], params: Dict[str, Any]) -> List[str]:
-        """Return a list of flags based on the patient data and analyzed parameters."""
-        ...
+        """Analyzes parameters against ranges to return clinical flags."""
+        pass
 
-    def note(self, param: str, status: str) -> str:
-        """Return a clinical note for a specific parameter and its status."""
-        ...
+    @abstractmethod
+    def notes(self, param: str, status: str) -> str:
+        """Returns clinical notes based on parameter status (Normal/High/Low)."""
+        pass
 
+    @abstractmethod
     def rule_risk(self, data: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Deterministic rule-based risk assessment."""
-        ...
+        """Deterministic scoring based on lab values."""
+        pass
 
-    def predict_risk(self, data: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """ML or advanced risk prediction."""
-        ...
+    @abstractmethod
+    def predict_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """ML-based risk prediction, falls back to rule_risk."""
+        pass
 
+    @abstractmethod
     def score_symptoms(self, symptoms: List[str]) -> Dict[str, Any]:
-        """Score symptoms against the disease profile."""
-        ...
+        """Matches user symptoms against profiles to return a severity score."""
+        pass
