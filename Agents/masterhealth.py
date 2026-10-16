@@ -887,10 +887,10 @@ class MasterHealthAgent:
                 "alert": result["alert_result"].get("alert"),
                 "report": result["alert_result"].get("report"),
             } if result.get("alert_result") else {}),
-            **({"disease_results": result.get("disease_results")},
-            **({"trend_result": result.get("trend_result")},
-            **({"differential_result": result.get("differential_result")},
-            **({"explanation": result.get("explanation")},
+            **({"disease_results": result.get("disease_results")} if result.get("disease_results") else {}),
+            **({"trend_result": result.get("trend_result")} if result.get("trend_result") else {}),
+            **({"differential_result": result.get("differential_result")} if result.get("differential_result") else {}),
+            **({"explanation": result.get("explanation")} if result.get("explanation") else {}),
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
@@ -956,10 +956,10 @@ class MasterHealthAgent:
                 "alert": result["alert_result"].get("alert"),
                 "report": result["alert_result"].get("report"),
             } if result.get("alert_result") else {}),
-            **({"disease_results": result.get("disease_results")},
-            **({"trend_result": result.get("trend_result")},
-            **({"differential_result": result.get("differential_result")},
-            **({"explanation": result.get("explanation")},
+            **({"disease_results": result.get("disease_results")} if result.get("disease_results") else {}),
+            **({"trend_result": result.get("trend_result")} if result.get("trend_result") else {}),
+            **({"differential_result": result.get("differential_result")} if result.get("differential_result") else {}),
+            **({"explanation": result.get("explanation")} if result.get("explanation") else {}),
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
