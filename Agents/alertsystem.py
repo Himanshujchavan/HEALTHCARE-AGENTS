@@ -36,15 +36,35 @@ except Exception:  # pragma: no cover - graceful import fallback
 logger = logging.getLogger(__name__)
 
 
+from utils.helpers import normalize_level
+
 @dataclass
 class AlertThresholds:
-    """Default alert thresholds. In a multi-disease system, these would be
-    provided by the active DiseasePlugin.
+    """Default alert thresholds. In a multi-disease system, these can be
+    configured or read from the active DiseasePlugin.
     """
     probability: float = 0.70
     symptom_score: float = 0.60
     abnormal_parameters: int = 3
-    # Parameter-specific thresholds are now handled via plugin.param_alert_thresholds
+    _diabetes_probability: Optional[float] = None
+    _hba1c: Optional[float] = None
+
+    @property
+    def diabetes_probability(self) -> float:
+        return self._diabetes_probability if self._diabetes_probability is not None else self.probability
+
+    @diabetes_probability.setter
+    def diabetes_probability(self, val: float):
+        self._diabetes_probability = val
+        self.probability = val
+
+    @property
+    def hba1c(self) -> float:
+        return self._hba1c if self._hba1c is not None else 7.0
+
+    @hba1c.setter
+    def hba1c(self, val: float):
+        self._hba1c = val
 
 
 class AlertAgent:
@@ -76,9 +96,14 @@ class AlertAgent:
 				"triggers": ["..."]
 			}
 		"""
+		disease = (
+			result.get("disease")
+			or (result.get("final_assessment") or {}).get("disease")
+			or "diabetes"
+		)
 		evaluation = self._evaluate_risk(result)
 		report = self._generate_report(result, evaluation)
-		notification = self._build_notification(evaluation)
+		notification = self._build_notification(evaluation, disease=disease)
 
 		return {
 			"alert": evaluation["alert"],
@@ -94,19 +119,21 @@ class AlertAgent:
 		"""Apply deterministic thresholds to decide whether to trigger alert."""
 		metrics = self._extract_metrics(result)
 
-		probability = metrics.get("diabetes_probability")
-		hba1c = metrics.get("hba1c")
+		probability = metrics.get("probability") if metrics.get("probability") is not None else metrics.get("diabetes_probability")
+		symptom_score = metrics.get("symptom_score")
 		abnormal_count = metrics.get("abnormal_parameters")
 
 		triggers: List[str] = []
 
-		if probability is not None and probability > self.thresholds.diabetes_probability:
+		if probability is not None and probability > self.thresholds.probability:
 			triggers.append(
-				f"diabetes_probability {probability:.2f} > {self.thresholds.diabetes_probability:.2f}"
+				f"probability {probability:.2f} > {self.thresholds.probability:.2f}"
 			)
 
-		if hba1c is not None and hba1c > self.thresholds.hba1c:
-			triggers.append(f"hba1c {hba1c:.2f} > {self.thresholds.hba1c:.2f}")
+		if symptom_score is not None and symptom_score >= self.thresholds.symptom_score:
+			triggers.append(
+				f"symptom_score {symptom_score:.2f} >= {self.thresholds.symptom_score:.2f}"
+			)
 
 		if (
 			abnormal_count is not None
@@ -117,8 +144,32 @@ class AlertAgent:
 				f"{abnormal_count} >= {self.thresholds.abnormal_parameters}"
 			)
 
+		disease = (
+			result.get("disease")
+			or (result.get("final_assessment") or {}).get("disease")
+		)
+		plugin = None
+		if disease:
+			from Agents.plugins import registry
+			plugin = registry.get(disease)
+
+		if plugin is not None and hasattr(plugin, "alert_thresholds"):
+			for param, thresh in plugin.alert_thresholds.items():
+				val = metrics.get(param)
+				if val is not None and val >= thresh:
+					triggers.append(f"{param} {val:.2f} >= {thresh:.2f}")
+		else:
+			hba1c = metrics.get("hba1c")
+			if hba1c is not None and hba1c > self.thresholds.hba1c:
+				triggers.append(f"hba1c {hba1c:.2f} > {self.thresholds.hba1c:.2f}")
+
 		alert = len(triggers) > 0
-		risk_level = self._derive_risk_level(probability, alert, len(triggers))
+
+		supplied_level = result.get("risk_level") or (result.get("final_assessment") or {}).get("risk_level")
+		if supplied_level:
+			risk_level = normalize_level(supplied_level)
+		else:
+			risk_level = self._derive_risk_level(probability, alert, len(triggers))
 
 		return {
 			"alert": alert,
@@ -132,12 +183,23 @@ class AlertAgent:
 		risk_result = result.get("risk_result") or {}
 		analysis_result = result.get("analysis_result") or {}
 		health_data = result.get("health_data") or {}
+		final_assessment = result.get("final_assessment") or {}
+		symptom_result = result.get("symptom_result") or {}
 
 		probability = (
-			result.get("diabetes_probability")
+			result.get("probability")
+			or result.get("diabetes_probability")
 			or result.get("risk_probability")
+			or final_assessment.get("score")
 			or risk_result.get("risk_probability")
 			or risk_result.get("risk_percentage")
+		)
+
+		symptom_score = (
+			result.get("symptom_score")
+			or final_assessment.get("symptom_score")
+			or symptom_result.get("severity_score")
+			or symptom_result.get("severity")
 		)
 
 		hba1c = (
@@ -167,12 +229,47 @@ class AlertAgent:
 		)
 		bmi = result.get("bmi") or health_data.get("bmi") or analysis_result.get("bmi")
 
+		systolic_bp = (
+			result.get("systolic_bp")
+			or health_data.get("systolic_bp")
+			or analysis_result.get("systolic_bp")
+		)
+		diastolic_bp = (
+			result.get("diastolic_bp")
+			or health_data.get("diastolic_bp")
+			or analysis_result.get("diastolic_bp")
+		)
+		total_cholesterol = (
+			result.get("total_cholesterol")
+			or health_data.get("total_cholesterol")
+			or analysis_result.get("total_cholesterol")
+		)
+		ldl = (
+			result.get("ldl")
+			or health_data.get("ldl")
+			or analysis_result.get("ldl")
+		)
+		hdl = (
+			result.get("hdl")
+			or health_data.get("hdl")
+			or analysis_result.get("hdl")
+		)
+
+		parsed_prob = self._parse_probability(probability)
+
 		return {
-			"diabetes_probability": self._parse_probability(probability),
-			"hba1c": self._to_float(hba1c),
+			"probability": parsed_prob,
+			"diabetes_probability": parsed_prob,
+			"symptom_score": self._to_float(symptom_score),
 			"abnormal_parameters": self._to_int(abnormal_count),
+			"hba1c": self._to_float(hba1c),
 			"glucose": self._to_float(glucose),
 			"bmi": self._to_float(bmi),
+			"systolic_bp": self._to_float(systolic_bp),
+			"diastolic_bp": self._to_float(diastolic_bp),
+			"total_cholesterol": self._to_float(total_cholesterol),
+			"ldl": self._to_float(ldl),
+			"hdl": self._to_float(hdl),
 		}
 
 	@staticmethod
@@ -233,9 +330,9 @@ class AlertAgent:
 		trigger_count: int,
 	) -> str:
 		if probability is not None:
-			if probability >= 0.85:
+			if probability >= 0.80:
 				return "Critical"
-			if probability >= 0.70:
+			if probability >= 0.65:
 				return "High"
 			if probability >= 0.40:
 				return "Moderate"
@@ -310,26 +407,37 @@ class AlertAgent:
 	def _generate_report_fallback(self, result: Dict[str, Any], evaluation: Dict[str, Any]) -> str:
 		metrics = evaluation["metrics"]
 		level = evaluation["risk_level"]
+		disease = (
+			result.get("disease")
+			or (result.get("final_assessment") or {}).get("disease")
+			or "diabetes"
+		)
 
 		lines: List[str] = []
 
-		if metrics.get("diabetes_probability") is not None:
-			percentage = int(round(metrics["diabetes_probability"] * 100))
-			lines.append(f"Risk Level: {level}. Estimated diabetes risk is about {percentage}%.")
+		prob = metrics.get("probability") if metrics.get("probability") is not None else metrics.get("diabetes_probability")
+		if prob is not None:
+			percentage = int(round(prob * 100))
+			lines.append(f"Risk Level: {level}. Estimated {disease} risk is about {percentage}%.")
 		else:
 			lines.append(f"Risk Level: {level}.")
 
 		param_parts: List[str] = []
-		if metrics.get("hba1c") is not None:
-			param_parts.append(f"HbA1c {metrics['hba1c']:.1f}%")
-		if metrics.get("glucose") is not None:
-			param_parts.append(f"Glucose {metrics['glucose']:.0f}")
-		if metrics.get("bmi") is not None:
-			param_parts.append(f"BMI {metrics['bmi']:.1f}")
+		for p in ("hba1c", "glucose", "bmi", "systolic_bp", "diastolic_bp", "total_cholesterol", "ldl", "hdl"):
+			if metrics.get(p) is not None:
+				val = metrics[p]
+				if isinstance(val, float):
+					param_parts.append(f"{p} {val:.1f}")
+				else:
+					param_parts.append(f"{p} {val}")
 		if metrics.get("abnormal_parameters") is not None:
 			param_parts.append(f"Abnormal parameters {metrics['abnormal_parameters']}")
 		if param_parts:
 			lines.append("Key parameters: " + ", ".join(param_parts) + ".")
+
+		explanation = result.get("explanation")
+		if explanation:
+			lines.append(explanation)
 
 		symptom_context = self._build_symptom_context(result)
 		if symptom_context:
@@ -514,17 +622,18 @@ class AlertAgent:
 			)
 		return notes
 
-	def _build_notification(self, evaluation: Dict[str, Any]) -> str:
+	def _build_notification(self, evaluation: Dict[str, Any], disease: str = "diabetes") -> str:
 		"""Create short warning/reassurance notification text."""
+		disease_title = disease.title()
 		if evaluation["alert"]:
 			return (
-				"High Diabetes Risk Detected. "
+				f"High {disease_title} Risk Detected. "
 				"Your values suggest increased risk. "
 				"Please consult a healthcare professional for further evaluation."
 			)
 
 		return (
-			"No immediate diabetes alert. "
+			f"No immediate {disease.lower()} alert. "
 			"Your current values appear within acceptable limits. "
 			"Maintain healthy habits and monitor regularly."
 		)

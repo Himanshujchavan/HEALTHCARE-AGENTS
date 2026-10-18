@@ -77,23 +77,35 @@ def validate_parameters(data: dict, plugin=None) -> dict:
     abnormal = 0
     abnormal_params = []
 
+    valid_keys = set(plugin.required_fields + getattr(plugin, "optional_fields", []))
+
     for k, v in data.items():
+        if k not in valid_keys:
+            continue
+        if v is None:
+            continue
+
+        try:
+            val_num = float(v)
+        except (ValueError, TypeError):
+            continue
+
         r = plugin.reference_ranges.get(k)
 
         if not r:
             results[k] = {
-                "value": v,
+                "value": val_num,
                 "status": "Unknown",
                 "unit": "",
                 "note": "No reference range available",
             }
             continue
 
-        if v < r["low"]:
+        if val_num < r["low"]:
             status = "Low"
             abnormal += 1
             abnormal_params.append(k)
-        elif v > r["high"]:
+        elif val_num > r["high"]:
             status = "High"
             abnormal += 1
             abnormal_params.append(k)
@@ -101,10 +113,10 @@ def validate_parameters(data: dict, plugin=None) -> dict:
             status = "Normal"
 
         results[k] = {
-            "value": v,
+            "value": val_num,
             "status": status,
             "unit": UNITS.get(k, r.get("unit", "")),
-            "note": plugin.note(k, status),
+            "note": plugin.notes(k, status),
         }
 
     flags = plugin.flags(data, results)

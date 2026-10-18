@@ -20,7 +20,8 @@ from database.crud import (
     get_user_health_records,
     get_latest_health_record,
     update_health_record_analysis,
-    delete_health_record
+    delete_health_record,
+    get_history
 )
 from schemas.health_schema import (
     HealthInput,
@@ -184,18 +185,20 @@ async def submit_health_data(
         record = create_health_record(db, user.id, data)
         
         # Step 4: Trigger Master Health Agent
-        health_data_dict = {
-            "hba1c": data.hba1c,
-            "glucose": data.glucose,
-            "bmi": data.bmi,
-            "age": data.age,
-            "symptoms": data.symptoms,
-        }
+        # Build health data dict from all provided non-null fields
+        health_data_dict = data.model_dump(
+            exclude_none=True,
+            exclude={"symptoms", "manual_text", "use_llm"},
+        )
+
+        # Retrieve recent history for trend analysis (exclude current record)
+        history = get_history(db, user.id, exclude_id=record.id, limit=10)
 
         workflow_result = master_agent.process_health_data(
             health_data=health_data_dict,
             manual_text=data.manual_text,
             use_llm=bool(data.use_llm),
+            history=history,
         )
 
         # Step 5: Store workflow result
@@ -214,6 +217,11 @@ async def submit_health_data(
             alert=workflow_result.get("alert"),
             report=workflow_result.get("report"),
             final_assessment=workflow_result.get("final_assessment"),
+            disease=workflow_result.get("disease_results"),
+            explanation=workflow_result.get("explanation"),
+            trend=workflow_result.get("trend_result"),
+            differential=workflow_result.get("differential_result"),
+            disease_results=workflow_result.get("disease_results"),
         )
     
     except Exception as e:
@@ -640,10 +648,13 @@ async def reanalyze_record(
         
         # Re-run master workflow
         health_data_dict = {
-            "hba1c": record.hba1c,
-            "glucose": record.glucose,
-            "bmi": record.bmi,
-            "age": record.age
+            field: value
+            for field in (
+                "hba1c", "glucose", "bmi", "age",
+                "systolic_bp", "diastolic_bp", "total_cholesterol",
+                "ldl", "hdl", "smoker",
+            )
+            if (value := getattr(record, field, None)) is not None
         }
 
         # Restore symptoms and manual text from DB for consistent re-analysis

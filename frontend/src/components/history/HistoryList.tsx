@@ -27,7 +27,10 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
     }
 
     return sorted.filter((report) =>
-      `${report.id}`.includes(q) || `${report.hba1c}`.includes(q) || `${report.glucose}`.includes(q),
+      `${report.id}`.includes(q) ||
+      `${report.disease ?? ""}`.toLowerCase().includes(q) ||
+      `${report.hba1c ?? ""}`.includes(q) ||
+      `${report.glucose ?? ""}`.includes(q),
     );
   }, [reports, query, sortDir]);
 
@@ -64,7 +67,7 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
             className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/80 px-5 py-4 md:flex-row md:items-center md:justify-between"
           >
             <div>
-              <p className="text-sm font-semibold text-slate-900">Report #{report.id}</p>
+              <p className="text-sm font-semibold text-slate-900">Report #{report.id} · {report.disease ?? "Health"}</p>
               <p className="text-xs text-slate-500">
                 {new Date(report.created_at).toLocaleDateString()} · HbA1c {report.hba1c}
               </p>

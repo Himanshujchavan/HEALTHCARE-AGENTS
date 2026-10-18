@@ -1675,9 +1675,19 @@ __all__ = [
     "MEDICAL_SYNONYMS",
     "REASONING_MODEL",
     "SemanticSymptomMatcher",
-    "PimaModel",
     "_extract_symptoms_from_text",
+    "SymptomCheckerAgent",
 ]
+
+class SymptomCheckerAgent:
+    """Wrapper class providing an object-oriented interface for symptom analysis."""
+    def __init__(self, use_llm: bool = False):
+        self.use_llm = use_llm
+
+    def analyze_symptoms(self, *args, **kwargs):
+        if "use_llm" not in kwargs:
+            kwargs["use_llm"] = self.use_llm
+        return analyze_symptoms(*args, **kwargs)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

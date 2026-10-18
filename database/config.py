@@ -60,7 +60,18 @@ def get_db():
 
 def init_db():
     """
-    Initialize database - create all tables
+    Apply versioned database migrations.
     """
-    from database.models import User, HealthRecord  # Import models
-    Base.metadata.create_all(bind=engine)
+    from alembic import command
+    from alembic.config import Config
+    from alembic.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    alembic_config = Config("alembic.ini")
+    with engine.connect() as connection:
+        current_revision = MigrationContext.configure(connection).get_current_revision()
+    script = ScriptDirectory.from_config(alembic_config)
+    head_revisions = set(script.get_heads())
+    if current_revision in head_revisions:
+        return
+    command.upgrade(alembic_config, "head")

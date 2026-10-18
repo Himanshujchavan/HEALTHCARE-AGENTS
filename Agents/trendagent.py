@@ -1,51 +1,103 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .plugins.base import DiseasePlugin
+
+def _extract_param_value(h: Dict, param: str) -> Optional[float]:
+    if not isinstance(h, dict):
+        return None
+    if "params" in h and isinstance(h["params"], dict) and param in h["params"]:
+        val = h["params"][param]
+        if isinstance(val, dict):
+            val = val.get("value")
+        try:
+            return float(val) if val is not None else None
+        except (ValueError, TypeError):
+            return None
+    analysis = h.get("analysis")
+    if isinstance(analysis, dict):
+        parameters = analysis.get("parameters")
+        if isinstance(parameters, dict) and param in parameters:
+            p_obj = parameters[param]
+            val = p_obj.get("value") if isinstance(p_obj, dict) else p_obj
+            try:
+                return float(val) if val is not None else None
+            except (ValueError, TypeError):
+                return None
+    if param in h:
+        try:
+            return float(h[param]) if h[param] is not None else None
+        except (ValueError, TypeError):
+            return None
+    return None
 
 class TrendAgent:
     """Analyzes health trends over time for a specific disease."""
 
     @staticmethod
     def run_trend(history: List[Dict], plugin: DiseasePlugin, current: Dict) -> Dict[str, Any]:
-        if not history or len(history) < 2:
+        # Window includes the historical records plus the current record
+        if not history or len(history) < 1:
             return {
                 "trend_score": 0.0,
                 "direction": "stable",
-                "visits_used": 0,
+                "rising_but_normal": [],
+                "visits_used": 1 if current else 0,
                 "status": "insufficient_history"
             }
 
         max_delta_score = 0.0
-        direction = "stable"
+        overall_direction = "stable"
+        rising_but_normal = []
 
         # Analyze parameters defined in plugin.trend_scales
         for param, scale in plugin.trend_scales.items():
-            if param not in current:
+            current_raw = current.get(param)
+            if current_raw is None:
+                continue
+            try:
+                current_val = float(current_raw)
+            except (ValueError, TypeError):
                 continue
 
-            # Get the most recent historical value
-            past_values = [h.get("analysis", {}).get("parameters", {}).get(param)
-                          for h in history if "analysis" in h and param in h["analysis"]["parameters"]]
+            # Extract past values across history (oldest first)
+            past_values = []
+            for h in history:
+                val = _extract_param_value(h, param)
+                if val is not None:
+                    past_values.append(val)
 
             if not past_values:
                 continue
 
-            last_val = past_values[-1]
-            if last_val is None: continue
+            # Oldest in history is first_val
+            first_val = past_values[0]
+            delta = current_val - first_val
 
-            current_val = current.get(param)
-            if current_val is None: continue
+            # Normalized score based on scale:
+            # For positive scale: delta > 0 is deteriorating (rising is bad)
+            # For negative scale: delta < 0 is deteriorating (falling is bad)
+            raw_score = delta / scale
+            param_score = max(0.0, min(1.0, raw_score))
 
-            delta = current_val - last_val
-            # Score is clamp(delta / scale, 0, 1)
-            param_score = max(0.0, min(1.0, delta / scale))
+            param_direction = "rising" if delta > 0 else ("falling" if delta < 0 else "stable")
+
+            # Check rising_but_normal
+            if delta > 0 and hasattr(plugin, "reference_ranges") and param in plugin.reference_ranges:
+                r = plugin.reference_ranges[param]
+                low = r.get("low", float("-inf"))
+                high = r.get("high", float("inf"))
+                if low <= current_val <= high:
+                    rising_but_normal.append(param)
 
             if param_score > max_delta_score:
                 max_delta_score = param_score
-                direction = "rising" if delta > 0 else "falling"
+                overall_direction = param_direction
+
+        total_visits = len(history) + 1
 
         return {
-            "trend_score": max_delta_score,
-            "direction": direction,
-            "visits_used": len(history),
+            "trend_score": round(max_delta_score, 4),
+            "direction": overall_direction,
+            "rising_but_normal": rising_but_normal,
+            "visits_used": total_visits,
             "status": "completed"
         }

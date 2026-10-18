@@ -14,11 +14,11 @@ def get(name: str) -> Optional[DiseasePlugin]:
 
 def applicable(health_data: Dict[str, Any]) -> List[DiseasePlugin]:
     """
-    Returns all plugins whose required fields are present in the health data.
+    Returns all plugins whose required fields are present in the health data and not None.
     """
     applicable_plugins = []
     for plugin in _plugins.values():
-        if all(field in health_data for field in plugin.required_fields):
+        if all(health_data.get(field) is not None for field in plugin.required_fields):
             applicable_plugins.append(plugin)
     return applicable_plugins
 

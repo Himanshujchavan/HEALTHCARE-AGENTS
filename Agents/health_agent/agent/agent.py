@@ -1,10 +1,15 @@
 import os
-from langchain_groq import ChatGroq
+try:
+    from langchain_groq import ChatGroq
+except ImportError:
+    ChatGroq = None
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from agent.tools import assess_risk, triage_route, add_disclaimer
 from agent.memory import create_memory
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 def build_agent():
+    if ChatGroq is None:
+        raise ImportError("langchain_groq is not installed")
     SYSTEM_PROMPT = """You are a compassionate and careful AI health assistant.
 You help users understand their symptoms and assess potential health risks.
 

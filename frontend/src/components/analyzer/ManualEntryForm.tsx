@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { HeartPulse, Syringe } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { HealthInput } from "../../models/health";
 import { SectionCard } from "../shared/SectionCard";
@@ -23,6 +24,7 @@ export function ManualEntryForm({ onSubmit, isLoading }: ManualEntryFormProps) {
   });
   const [symptoms, setSymptoms] = useState<string[]>([]);
   const [customSymptom, setCustomSymptom] = useState("");
+  const [disease, setDisease] = useState<"diabetes" | "cardiovascular">("diabetes");
 
   const toggleSymptom = (symptom: string) => {
     setSymptoms((prev) =>
@@ -45,9 +47,28 @@ export function ManualEntryForm({ onSubmit, isLoading }: ManualEntryFormProps) {
     <SectionCard title="Manual health entry">
       <form
         className="space-y-6"
-        onSubmit={handleSubmit((values) => onSubmit({ ...values, symptoms }))}
+        onSubmit={handleSubmit((values) => {
+          const fields = disease === "diabetes"
+            ? ["hba1c", "glucose", "bmi", "age"]
+            : ["age", "systolic_bp", "diastolic_bp", "total_cholesterol", "ldl", "hdl", "smoker"];
+          const selectedValues = Object.fromEntries(
+            fields
+              .filter((field) => values[field as keyof HealthInput] !== undefined && values[field as keyof HealthInput] !== 0)
+              .map((field) => [field, values[field as keyof HealthInput]]),
+          ) as HealthInput;
+          onSubmit({ ...selectedValues, symptoms, manual_text: values.manual_text, use_llm: values.use_llm });
+        })}
       >
+        <div className="flex gap-3">
+          <button type="button" onClick={() => setDisease("diabetes")} className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${disease === "diabetes" ? "bg-emerald-600 text-white" : "border border-slate-200 text-slate-600"}`}>
+            <Syringe size={16} /> Diabetes
+          </button>
+          <button type="button" onClick={() => setDisease("cardiovascular")} className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${disease === "cardiovascular" ? "bg-emerald-600 text-white" : "border border-slate-200 text-slate-600"}`}>
+            <HeartPulse size={16} /> Cardiovascular
+          </button>
+        </div>
         <div className="grid gap-4 md:grid-cols-2">
+          {disease === "diabetes" ? <>
           <label className="space-y-2 text-sm text-slate-600">
             HbA1c (%)
             <input
@@ -59,30 +80,25 @@ export function ManualEntryForm({ onSubmit, isLoading }: ManualEntryFormProps) {
           </label>
           <label className="space-y-2 text-sm text-slate-600">
             Glucose (mg/dL)
-            <input
-              type="number"
-              step="0.1"
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-              {...register("glucose", { valueAsNumber: true })}
-            />
+            <input type="number" step="0.1" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("glucose", { valueAsNumber: true })} />
           </label>
           <label className="space-y-2 text-sm text-slate-600">
             BMI
-            <input
-              type="number"
-              step="0.1"
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-              {...register("bmi", { valueAsNumber: true })}
-            />
+            <input type="number" step="0.1" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("bmi", { valueAsNumber: true })} />
           </label>
           <label className="space-y-2 text-sm text-slate-600">
             Age
-            <input
-              type="number"
-              className="w-full rounded-xl border border-slate-200 px-4 py-3"
-              {...register("age", { valueAsNumber: true })}
-            />
+            <input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("age", { valueAsNumber: true })} />
           </label>
+          </> : <>
+          <label className="space-y-2 text-sm text-slate-600">Age<input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("age", { valueAsNumber: true })} /></label>
+          <label className="space-y-2 text-sm text-slate-600">Systolic BP<input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("systolic_bp", { valueAsNumber: true })} /></label>
+          <label className="space-y-2 text-sm text-slate-600">Diastolic BP<input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("diastolic_bp", { valueAsNumber: true })} /></label>
+          <label className="space-y-2 text-sm text-slate-600">Total cholesterol<input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("total_cholesterol", { valueAsNumber: true })} /></label>
+          <label className="space-y-2 text-sm text-slate-600">LDL<input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("ldl", { valueAsNumber: true })} /></label>
+          <label className="space-y-2 text-sm text-slate-600">HDL<input type="number" className="w-full rounded-xl border border-slate-200 px-4 py-3" {...register("hdl", { valueAsNumber: true })} /></label>
+          <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" {...register("smoker")} /> Smoker</label>
+          </>}
         </div>
 
         <div className="space-y-3">

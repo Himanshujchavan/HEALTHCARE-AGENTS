@@ -1,17 +1,22 @@
 from typing import List, Dict, Any, Optional
+import json
+import logging
 from .base import DiseasePlugin
-import numpy as np
+from utils.helpers import normalize_level
+
+logger = logging.getLogger(__name__)
 
 class DiabetesPlugin(DiseasePlugin):
     name = "diabetes"
     required_fields = ["hba1c", "glucose", "bmi", "age"]
-    optional_fields = ["blood_pressure", "creatinine"]
+    optional_fields = ["homa_ir"]
 
     reference_ranges = {
         "hba1c": {"low": 4.0, "high": 5.6, "unit": "%"},
         "glucose": {"low": 70, "high": 99, "unit": "mg/dL"},
         "bmi": {"low": 18.5, "high": 24.9, "unit": "kg/m2"},
         "age": {"low": 0, "high": 120, "unit": "years"},
+        "homa_ir": {"low": 0.0, "high": 2.5, "unit": "index"},
     }
 
     trend_scales = {
@@ -21,7 +26,7 @@ class DiabetesPlugin(DiseasePlugin):
     }
 
     symptom_profiles = {
-        "primary": ["polyuria", "polydipsia", "polyphagia", "unexplained weight loss"],
+        "primary": ["polyuria", "polydipsia", "polyphagia", "unexplained weight loss", "fatigue"],
         "complications": {
             "cardiovascular": ["chest pain", "shortness of breath", "palpitations"],
             "cerebrovascular": ["slurred speech", "face droop", "one-side weakness"],
@@ -31,70 +36,80 @@ class DiabetesPlugin(DiseasePlugin):
     }
 
     alert_thresholds = {
-        "hba1c": 8.0,
+        "hba1c": 7.0,
         "glucose": 200.0
     }
 
     def flags(self, data: Dict[str, Any], params: Dict[str, Any]) -> List[str]:
         flags = []
-        hba1c = data.get("hba1c", 0)
-        if hba1c >= 6.5:
-            flags.append("DIABETES CRITERIA MET")
-        elif hba1c >= 5.7:
-            flags.append("PRE-DIABETES RANGE")
+        hba1c = data.get("hba1c")
+        if hba1c is not None:
+            try:
+                if float(hba1c) >= 6.5:
+                    flags.append("DIABETES CRITERIA MET")
+                elif float(hba1c) >= 5.7:
+                    flags.append("PRE-DIABETES RANGE")
+            except (ValueError, TypeError):
+                pass
+
+        homa_ir = data.get("homa_ir")
+        if homa_ir is not None:
+            try:
+                if float(homa_ir) > 2.5:
+                    flags.append("INSULIN RESISTANCE")
+            except (ValueError, TypeError):
+                pass
+        elif params and params.get("homa_ir", {}).get("status") == "High":
+            flags.append("INSULIN RESISTANCE")
+
         return flags
 
-    def note(self, param: str, status: str) -> str:
+    def notes(self, param: str, status: str) -> str:
         notes_map = {
             "hba1c": {"High": "Diabetic range (ADA 6.5%+)", "Low": "Hypoglycemia risk"},
-            "glucose": {"High": "Hyperglycemic state", "Low": "Low blood sugar"},
+            "glucose": {"High": "FPG diabetes criterion (≥126 mg/dL)", "Low": "Low blood sugar"},
             "bmi": {"High": "Overweight/Obese range", "Low": "Underweight range"},
+            "homa_ir": {"High": "Insulin resistance marker (>2.5)", "Low": "Normal"},
         }
         return notes_map.get(param, {}).get(status, "Check clinical guidelines")
 
-    def notes(self, param: str, status: str) -> str:
-        return self.note(param, status)
+    def rule_risk(self, data: Dict[str, Any], analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        from Agents.riskpredictor import compute_diabetes_rule_risk
+        res = compute_diabetes_rule_risk(data, analysis)
+        raw_level = res.get("risk_level") or "Low"
+        norm_level = normalize_level(raw_level)
+        score = res.get("risk_score")
+        if score is None:
+            score = 0.0
+        prob = res.get("risk_probability")
+        if prob is None:
+            prob = round(score / 100.0, 2)
 
-    def rule_risk(self, data: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
-        # Migrated from riskpredictor.py
-        hba1c = data.get("hba1c", 0)
-        glucose = data.get("glucose", 0)
-        bmi = data.get("bmi", 0)
-        age = data.get("age", 0)
+        return {
+            "score": score,
+            "level": norm_level,
+            "risk_level": norm_level,
+            "risk_probability": prob,
+            "risk_percentage": f"{int(round(score))}%",
+            "method": "rule-based",
+            "summary": res.get("summary", "")
+        }
 
-        # Scores based on migration map
-        hba1c_score = 1.0 if hba1c >= 6.5 else (0.6 if hba1c >= 5.7 else 0.0)
-        glucose_score = 1.0 if glucose >= 126 else (0.6 if glucose >= 100 else 0.0)
+    def predict_risk(self, data: Dict[str, Any], analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        try:
+            from Agents.riskpredictor import RiskPredictorAgent
+            predictor = RiskPredictorAgent()
+            risk_json = predictor.predict_from_analysis(analysis or data)
+            risk = json.loads(risk_json)
+            if risk.get("success") is not False and not risk.get("error"):
+                risk["risk_level"] = normalize_level(risk.get("risk_level", "Low"))
+                return risk
+        except Exception as e:
+            logger.debug(f"RiskPredictorAgent failed in DiabetesPlugin: {e}")
 
-        bmi_score = 0.0
-        if bmi >= 40: bmi_score = 1.0
-        elif bmi >= 35: bmi_score = 0.85
-        elif bmi >= 30: bmi_score = 0.7
-        elif bmi >= 25: bmi_score = 0.4
-
-        age_score = 0.0
-        if age >= 65: age_score = 0.8
-        elif age >= 55: age_score = 0.6
-        elif age >= 45: age_score = 0.4
-        elif age >= 35: age_score = 0.2
-
-        score = (hba1c_score * 0.35) + (glucose_score * 0.35) + (bmi_score * 0.20) + (age_score * 0.10)
-        final_score = score * 100
-
-        level = "LOW"
-        if final_score > 60: level = "CRITICAL"
-        elif final_score > 40: level = "HIGH"
-        elif final_score > 20: level = "MEDIUM"
-
-        return {"score": final_score, "level": level, "method": "rule-based"}
-
-    def predict_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        # Fallback to rule_risk if Pima model not available or data insufficient
-        # In a real scenario, this would load PimaModel.pkl
-        return self.rule_risk(data, {})
+        return self.rule_risk(data, analysis)
 
     def score_symptoms(self, symptoms: List[str]) -> Dict[str, Any]:
-        # Migrated from symptomchecker.py
         match_count = 0
         primary_symptoms = self.symptom_profiles["primary"]
         for s in symptoms:
@@ -102,4 +117,8 @@ class DiabetesPlugin(DiseasePlugin):
                 match_count += 1
 
         severity = min(match_count / max(len(primary_symptoms), 1), 1.0)
-        return {"severity": severity, "top_hypothesis": "Diabetes Mellitus" if severity > 0.3 else "Unknown"}
+        return {
+            "severity": severity,
+            "severity_score": severity,
+            "top_hypothesis": "Diabetes Mellitus" if severity > 0.3 else "Unknown"
+        }

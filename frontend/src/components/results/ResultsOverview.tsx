@@ -1,6 +1,7 @@
 import { AnalysisResult, HealthRecordResponse } from "../../models/health";
 import { RiskBadge } from "../shared/RiskBadge";
 import { SectionCard } from "../shared/SectionCard";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 interface ResultsOverviewProps {
   analysis?: AnalysisResult;
@@ -13,6 +14,9 @@ export function ResultsOverview({ analysis, record, showSymptomSection = true }:
   const alert = analysis?.alert as boolean | undefined;
   const summary = (analysis?.summary as string) || "Summary not available yet.";
   const report = (analysis?.report as string) || "";
+  const explanation = (analysis?.explanation as string) || "";
+  const trend = analysis?.trend_result as Record<string, any> | undefined;
+  const differential = analysis?.differential_result as Record<string, any> | undefined;
   const error = (analysis?.error as string) || "";
   const riskLabel = String(riskLevel || "Unknown");
   const scoreValue = analysis?.score ?? analysis?.final_assessment?.score;
@@ -89,6 +93,35 @@ export function ResultsOverview({ analysis, record, showSymptomSection = true }:
           <p>{report || "Your AI-generated preventive report will appear here."}</p>
         </div>
       </SectionCard>
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <SectionCard title="Explanation">
+          <p className="text-sm text-slate-600">{explanation || report || "Explanation is not available yet."}</p>
+        </SectionCard>
+        <SectionCard title="Trend">
+          <p className="mb-3 text-sm text-slate-600">
+            {trend?.status === "insufficient_history" ? "More visits are needed for a trend." : `${trend?.direction ?? "stable"} trend · ${trend?.visits_used ?? 0} visits`}
+          </p>
+          <ResponsiveContainer width="100%" height={100}>
+            <LineChart data={[{ name: "trend", value: Number(trend?.trend_score ?? 0) }]}>
+              <XAxis dataKey="name" hide />
+              <YAxis domain={[0, 1]} hide />
+              <Tooltip />
+              <Line type="monotone" dataKey="value" stroke="#059669" strokeWidth={3} dot />
+            </LineChart>
+          </ResponsiveContainer>
+        </SectionCard>
+        <SectionCard title="Differential">
+          {differential ? (
+            <div className="space-y-2 text-sm text-slate-600">
+              <p>Primary: <strong>{String(differential.primary ?? "Unknown")}</strong></p>
+              {(differential.alternatives ?? []).map((item: any) => (
+                <p key={String(item.disease)}>{String(item.disease)} · {Math.round(Number(item.score ?? 0) * 100)}%</p>
+              ))}
+            </div>
+          ) : <p className="text-sm text-slate-600">A differential is shown when multiple diseases are applicable.</p>}
+        </SectionCard>
+      </div>
 
       {showSymptomSection && (
         <SectionCard title="Symptom analysis">

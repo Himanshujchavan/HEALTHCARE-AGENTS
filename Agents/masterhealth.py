@@ -138,15 +138,17 @@ def analyze_report_node(state: HealthWorkflowState) -> dict:
             }
 
         analyzer = ReportAnalyzerAgent()
-        disease_results = {}
+        disease_results = dict(state.get("disease_results") or {})
 
         for plugin in plugins:
             analysis_json = analyzer.analyze_health_record(health_data, plugin=plugin)
-            disease_results[plugin.name] = json.loads(analysis_json)
+            if plugin.name not in disease_results:
+                disease_results[plugin.name] = {}
+            disease_results[plugin.name]["analysis"] = json.loads(analysis_json)
 
-        # Primary is the first applicable plugin (typically diabetes)
+        # Primary is the first applicable plugin
         primary_name = plugins[0].name
-        primary_analysis = disease_results[primary_name]
+        primary_analysis = disease_results[primary_name]["analysis"]
 
         updated_steps = {**state["steps"]}
         updated_steps["1_parameter_validation"] = {
@@ -182,36 +184,37 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
         from Agents.plugins.registry import applicable
 
         health_data = state.get("health_data", {})
-        analysis_results = state.get("disease_results", {})
+        disease_results = dict(state.get("disease_results") or {})
         plugins = applicable(health_data)
 
         disease_risks = {}
 
         for plugin in plugins:
             name = plugin.name
-            analysis = analysis_results.get(name, {})
+            analysis = (disease_results.get(name) or {}).get("analysis", {})
 
             if name == "diabetes":
-                # Diabetes keeps the existing chain: RiskPredictorAgent -> fallback
                 try:
                     from Agents.riskpredictor import RiskPredictorAgent
                     predictor = RiskPredictorAgent()
-                    risk_json = predictor.predict_from_analysis(analysis)
+                    risk_json = predictor.predict_from_analysis(analysis or health_data)
                     risk = json.loads(risk_json)
                     if risk.get("success") is False or risk.get("error"):
                         raise RuntimeError(risk.get("error") or "RiskPredictorAgent failed")
                 except Exception:
-                    # Fallback to rule-based
                     risk = _llm_risk_prediction(analysis, health_data)
-                disease_risks[name] = risk
             else:
-                # Other plugins use their own predict_risk implementation
-                disease_risks[name] = plugin.predict_risk(health_data, analysis)
+                risk = plugin.predict_risk(health_data, analysis)
+
+            risk["risk_level"] = normalize_level(risk.get("risk_level", "Low"))
+            disease_risks[name] = risk
+            if name not in disease_results:
+                disease_results[name] = {}
+            disease_results[name]["risk"] = risk
 
         if not disease_risks:
             return {"workflow_status": "failed", "error": "No risk predictions generated"}
 
-        # Primary is the first applicable
         primary_name = plugins[0].name
         primary_risk = disease_risks[primary_name]
 
@@ -225,7 +228,7 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
 
         return {
             "risk_result": primary_risk,
-            "disease_results": {**state.get("disease_results", {}), "risks": disease_risks},
+            "disease_results": disease_results,
             "steps": updated_steps
         }
     except Exception as e:
@@ -237,22 +240,29 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
 
 
 def generate_alert_node(state: HealthWorkflowState) -> dict:
-    """Generate final patient-facing alert/report from analysis + risk outputs."""
+    """Generate final patient-facing alert/report from winning disease and analysis + risk outputs."""
     try:
         logger.info("NODE generate_alert")
 
+        final_assessment = state.get("final_assessment") or {}
+        winning_disease = final_assessment.get("disease", "diabetes")
+
         alert_agent = AlertAgent(use_llm=state.get("use_llm", False))
         payload = {
+            "disease": winning_disease,
             "health_data": state.get("health_data", {}),
             "analysis_result": state.get("analysis_result", {}),
             "risk_result": state.get("risk_result", {}),
-            "risk_level": (state.get("final_assessment") or {}).get("risk_level"),
-            "diabetes_probability": (state.get("final_assessment") or {}).get("score"),
+            "risk_level": normalize_level(final_assessment.get("risk_level", "Low")),
+            "probability": final_assessment.get("score"),
+            "diabetes_probability": final_assessment.get("score"),
             "abnormal_parameters": (state.get("analysis_result") or {}).get("abnormal_count", 0),
-            "symptom_score": (state.get("final_assessment") or {}).get("symptom_score"),
+            "symptom_score": final_assessment.get("symptom_score"),
             "symptoms": state.get("symptoms") or [],
             "symptom_result": state.get("symptom_result") or {},
             "manual_text": state.get("manual_text"),
+            "explanation": state.get("explanation"),
+            "final_assessment": final_assessment,
         }
         alert_result = alert_agent.process(payload)
 
@@ -261,7 +271,7 @@ def generate_alert_node(state: HealthWorkflowState) -> dict:
             "steps": {**state["steps"], "7_alert_generation": {
                 "status": "completed",
                 "alert": alert_result.get("alert", False),
-                "risk_level": alert_result.get("risk_level", "Unknown"),
+                "risk_level": normalize_level(alert_result.get("risk_level", "Unknown")),
                 "alert_result": alert_result,
             }},
         }
@@ -284,9 +294,13 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
         symptoms = state.get("symptoms") or []
         manual_text = state.get("manual_text")
         health_data = state.get("health_data", {})
+        plugins = applicable(health_data)
+        disease_results = dict(state.get("disease_results") or {})
+
+        disease_symptoms = {}
 
         if not symptoms and not manual_text:
-            symptom_result = {
+            default_sym = {
                 "symptom_alignment": "low",
                 "severity_score": 0.0,
                 "reasoning": "No symptoms provided; symptom contribution kept minimal.",
@@ -303,21 +317,24 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
                     "unmatched_symptoms": [],
                 },
             }
+            for plugin in plugins:
+                disease_symptoms[plugin.name] = default_sym
+                if plugin.name not in disease_results:
+                    disease_results[plugin.name] = {}
+                disease_results[plugin.name]["symptom"] = default_sym
+            primary_name = plugins[0].name if plugins else "diabetes"
+            symptom_result = default_sym
         else:
-            plugins = applicable(health_data)
-            disease_symptoms = {}
-
             for plugin in plugins:
                 name = plugin.name
                 if name == "diabetes":
-                    # Diabetes keeps existing complex analyze_symptoms call
                     try:
                         from Agents.symptomchecker import SymptomCheckerAgent
                         checker = SymptomCheckerAgent()
-                        # Note: we assume analyze_symptoms is a method of the agent or accessible
+                        report_ctx = (disease_results.get(name) or {}).get("analysis") or state.get("analysis_result")
                         res = checker.analyze_symptoms(
                             symptoms=symptoms,
-                            report_context=state.get("analysis_result"),
+                            report_context=report_ctx,
                             manual_text=manual_text,
                             use_llm=state.get("use_llm", False),
                         )
@@ -325,21 +342,23 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
                         disease_symptoms[name] = res
                     except Exception as e:
                         logger.error(f"Diabetes symptom check failed: {e}")
-                        disease_symptoms[name] = {"error": str(e), "severity_score": 0.0}
+                        disease_symptoms[name] = {"error": str(e), "severity_score": 0.0, "symptom_alignment": "low"}
                 else:
-                    # Other plugins use a simple score_symptoms call
                     disease_symptoms[name] = plugin.score_symptoms(symptoms)
+
+                if name not in disease_results:
+                    disease_results[name] = {}
+                disease_results[name]["symptom"] = disease_symptoms[name]
 
             if not disease_symptoms:
                 raise RuntimeError("No disease plugins applicable for symptom check")
 
-            # Primary is the first applicable
             primary_name = plugins[0].name
             symptom_result = disease_symptoms[primary_name]
 
         return {
             "symptom_result": symptom_result,
-            "disease_results": {**state.get("disease_results", {}), "symptoms": disease_symptoms},
+            "disease_results": disease_results,
             "steps": {**state["steps"], "5_symptom_checker": {
                 "status": "completed",
                 "symptom_alignment": symptom_result.get("symptom_alignment"),
@@ -363,7 +382,7 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
 
 
 def merge_results_node(state: HealthWorkflowState) -> dict:
-    """Combine signals per disease and find the highest risk."""
+    """Combine signals per disease, fuse with individual trend, and find the highest risk."""
     try:
         logger.info("NODE merge_results: Multi-disease Fusion")
 
@@ -371,47 +390,52 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
         from Agents.plugins.registry import applicable
         plugins = applicable(health_data)
 
-        disease_results = state.get("disease_results", {})
-        analysis_map = disease_results.get("analysis", {})
-        risk_map = disease_results.get("risks", {})
-        symptom_map = disease_results.get("symptoms", {})
-        trend = state.get("trend_result")
+        disease_results = dict(state.get("disease_results") or {})
 
         all_fusions = {}
         for plugin in plugins:
             name = plugin.name
-            # Use _fuse helper to combine signals for this specific disease
+            entry = disease_results.get(name, {})
+            plugin_trend = entry.get("trend") or state.get("trend_result")
             fusion = _fuse(
-                analysis=analysis_map.get(name, {}),
-                risk=risk_map.get(name, {}),
-                symptom=symptom_map.get(name, {}),
-                trend=trend
+                analysis=entry.get("analysis", {}),
+                risk=entry.get("risk", {}),
+                symptom=entry.get("symptom", {}),
+                trend=plugin_trend
             )
+            fusion["risk_level"] = normalize_level(fusion.get("risk_level", "Low"))
             all_fusions[name] = fusion
+            disease_results[name]["final_assessment"] = fusion
 
         if not all_fusions:
             return {"workflow_status": "failed", "error": "No disease results to merge"}
 
-        # Primary is the highest scoring disease
-        primary_name = max(all_fusions, key=lambda k: all_fusions[k]["score"])
-        primary_assessment = all_fusions[primary_name]
+        # Winning disease is the highest scoring disease
+        winning_name = max(all_fusions, key=lambda k: all_fusions[k]["score"])
+        winning_assessment = all_fusions[winning_name]
+        winning_entry = disease_results.get(winning_name, {})
 
-        # Maintain legacy state for routes/frontend
-        # Primary assessment is the one used for the overall risk_level
         updated_steps = {**state["steps"]}
         updated_steps["6_result_fusion"] = {
             "status": "completed",
-            "risk_level": primary_assessment["risk_level"],
-            "score": primary_assessment["score"],
-            "final_assessment": primary_assessment,
+            "risk_level": winning_assessment["risk_level"],
+            "score": winning_assessment["score"],
+            "winning_disease": winning_name,
+            "final_assessment": winning_assessment,
+            "all_diseases": all_fusions,
         }
 
+        # Rebuild analysis_result, risk_result, symptom_result from the winning disease
         return {
+            "analysis_result": winning_entry.get("analysis") or state.get("analysis_result"),
+            "risk_result": winning_entry.get("risk") or state.get("risk_result"),
+            "symptom_result": winning_entry.get("symptom") or state.get("symptom_result"),
             "final_assessment": {
-                **primary_assessment,
-                "disease": primary_name,
+                **winning_assessment,
+                "disease": winning_name,
                 "all_diseases": all_fusions,
             },
+            "disease_results": disease_results,
             "steps": updated_steps
         }
     except Exception as e:
@@ -425,9 +449,17 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
 
 
 def finalize_node(state: HealthWorkflowState) -> dict:
-    """Mark the workflow as completed (unless already failed)."""
-    if state.get("workflow_status") != "failed":
-        return {"workflow_status": "completed"}
+    """Mark the workflow as completed (or completed_with_errors if errors occurred)."""
+    if state.get("workflow_status") == "failed":
+        return {}
+    steps = state.get("steps") or {}
+    has_errors = any(
+        isinstance(s, dict) and s.get("status") == "failed" for s in steps.values()
+    ) or (state.get("final_assessment") or {}).get("error") is not None
+
+    if has_errors:
+        return {"workflow_status": "completed_with_errors"}
+    return {"workflow_status": "completed"}
     return {}
 
 
@@ -448,91 +480,56 @@ def _llm_risk_prediction(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
 
 
 def _rule_based_risk(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
-    """Deterministic rule-based risk scoring (always available)."""
+    """Deterministic rule-based risk scoring (always available).
+
+    Delegates to the shared compute_diabetes_rule_risk function so
+    _rule_based_risk, _compute_lab_risk, and DiabetesPlugin.rule_risk()
+    all execute the single unified clinical rule scorer.
+    """
+    from Agents.riskpredictor import compute_diabetes_rule_risk
+    res = compute_diabetes_rule_risk(health_data, analysis)
+
+    raw_level = res.get("risk_level") or "Low"
+    risk_level = normalize_level(raw_level)
+    risk_score = res.get("risk_score") or 0
+    risk_probability = res.get("risk_probability")
+    if risk_probability is None:
+        risk_probability = round(risk_score / 100.0, 2)
+
     risk_factors = []
     recommendations = []
-
     hba1c = health_data.get("hba1c", 0)
     glucose = health_data.get("glucose", 0)
     bmi = health_data.get("bmi", 0)
     age = health_data.get("age", 0)
 
-    hba1c_score = 0.0
     if hba1c >= 6.5:
-        hba1c_score = 1.0
         risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "High"})
         recommendations.append("Consult endocrinologist for diabetes management")
     elif hba1c >= 5.7:
-        hba1c_score = 0.6
         risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "Medium"})
         recommendations.append("Monitor HbA1c every 3 months")
 
-    glucose_score = 0.0
     if glucose >= 126:
-        glucose_score = 1.0
         risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "High"})
         recommendations.append("Regular fasting glucose monitoring recommended")
     elif glucose >= 100:
-        glucose_score = 0.6
         risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "Medium"})
 
-    bmi_score = 0.0
-    if bmi >= 40:
-        bmi_score = 1.0
-        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High"})
+    if bmi >= 25:
+        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High" if bmi >= 30 else "Medium"})
         recommendations.append("Weight management program recommended")
-    elif bmi >= 35:
-        bmi_score = 0.85
-        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High"})
-        recommendations.append("Weight management program recommended")
-    elif bmi >= 30:
-        bmi_score = 0.7
-        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High"})
-        recommendations.append("Weight management program recommended")
-    elif bmi >= 25:
-        bmi_score = 0.4
-        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "Medium"})
 
-    age_score = 0.0
-    if age >= 65:
-        age_score = 0.8
+    if age >= 45:
         risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
-    elif age >= 55:
-        age_score = 0.6
-        risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
-    elif age >= 45:
-        age_score = 0.4
-        risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
-    elif age >= 35:
-        age_score = 0.2
 
     if not recommendations:
         recommendations.append("Maintain healthy lifestyle and regular checkups")
 
-    weighted_score = (
-        (hba1c_score * 0.35)
-        + (glucose_score * 0.35)
-        + (bmi_score * 0.2)
-        + (age_score * 0.1)
-    )
-    risk_score = int(round(weighted_score * 100))
-
-    if risk_score <= 20:
-        risk_level = normalize_level("Low")
-    elif risk_score <= 40:
-        risk_level = normalize_level("Moderate")
-    elif risk_score <= 60:
-        risk_level = normalize_level("High")
-    else:
-        risk_level = normalize_level("Critical")
-
-    risk_probability = round(risk_score / 100.0, 2)
-    risk_percentage = f"{risk_score}%"
-
     return {
         "risk_level": risk_level,
         "risk_probability": risk_probability,
-        "risk_percentage": risk_percentage,
+        "risk_percentage": f"{risk_score}%",
         "prediction_method": "rule_based",
         "risk_score": risk_score,
         "risk_factors": risk_factors,
@@ -541,35 +538,61 @@ def _rule_based_risk(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TREND, DIFFERENTIAL, & EXPLANATION NODES (Stubs for Step E)
+#  TREND, DIFFERENTIAL, & EXPLANATION NODES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def trend_analysis_node(state: HealthWorkflowState) -> dict:
-    """Perform trend analysis on historical health records."""
+    """Perform trend analysis per applicable disease on historical health records."""
     try:
-        logger.info("NODE trend: Analyzing historical trends")
+        logger.info("NODE trend: Analyzing historical trends per disease")
         from Agents.plugins.registry import applicable
 
         health_data = state["health_data"]
         plugins = applicable(health_data)
-        if not plugins:
-            return {"trend_result": {"status": "no_plugins"}, "steps": {**state["steps"], "5b_trend_analysis": {"status": "failed"}}}
-
-        primary_plugin = plugins[0]
         history = state.get("history") or []
+        disease_results = dict(state.get("disease_results") or {})
 
-        result = TrendAgent.run_trend(history, primary_plugin, health_data)
+        if not plugins:
+            res = {"status": "no_plugins", "trend_score": 0.0, "direction": "stable", "visits_used": 0}
+            return {"trend_result": res, "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": res}}}
+
+        trends_per_plugin = {}
+        for plugin in plugins:
+            try:
+                t_res = TrendAgent.run_trend(history, plugin, health_data)
+            except Exception as te:
+                logger.warning(f"Trend analysis failed for {plugin.name}: {te}")
+                t_res = {"trend_score": 0.0, "direction": "stable", "visits_used": 0, "status": "failed", "error": str(te)}
+            trends_per_plugin[plugin.name] = t_res
+            if plugin.name not in disease_results:
+                disease_results[plugin.name] = {}
+            disease_results[plugin.name]["trend"] = t_res
+
+        primary_name = plugins[0].name
+        primary_trend = trends_per_plugin.get(primary_name) or {
+            "trend_score": 0.0, "direction": "stable", "visits_used": 0, "status": "insufficient_history"
+        }
 
         return {
-            "trend_result": result,
-            "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": result}}
+            "trend_result": primary_trend,
+            "disease_results": disease_results,
+            "steps": {**state["steps"], "5b_trend_analysis": {
+                "status": "completed",
+                "result": primary_trend,
+                "all_trends": trends_per_plugin
+            }}
         }
     except Exception as e:
-        logger.error(f"Trend analysis failed: {e}")
-        return {"workflow_status": "failed", "error": str(e)}
+        logger.warning(f"Trend analysis failed gracefully: {e}")
+        fallback_trend = {"trend_score": 0.0, "direction": "stable", "visits_used": 0, "status": "failed", "error": str(e)}
+        return {
+            "trend_result": fallback_trend,
+            "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": fallback_trend, "warning": str(e)}}
+        }
+
 
 def differential_analysis_node(state: HealthWorkflowState) -> dict:
-    """Perform differential diagnosis analysis."""
+    """Perform differential diagnosis analysis across suspected diseases."""
     try:
         logger.info("NODE differential: Performing differential analysis")
         disease_results = state.get("disease_results", {})
@@ -579,34 +602,55 @@ def differential_analysis_node(state: HealthWorkflowState) -> dict:
 
         return {
             "differential_result": result,
-            "steps": {**state["steps"], "5c_differential_analysis": {"status": "completed", "result": result}}
+            "steps": {**state["steps"], "5c_differential_analysis": {
+                "status": "completed",
+                "result": result
+            }}
         }
     except Exception as e:
-        logger.error(f"Differential analysis failed: {e}")
-        return {"workflow_status": "failed", "error": str(e)}
+        logger.warning(f"Differential analysis failed gracefully: {e}")
+        return {
+            "differential_result": None,
+            "steps": {**state["steps"], "5c_differential_analysis": {
+                "status": "completed",
+                "result": None,
+                "warning": str(e)
+            }}
+        }
+
 
 def explanation_node(state: HealthWorkflowState) -> dict:
     """Generate medical explanation for the final assessment."""
     try:
-        logger.info("NODE explain: Generating medical explanation")
+        logger.info("NODE explain: Generating clinical explanation")
         final_assessment = state.get("final_assessment")
         trend = state.get("trend_result")
 
         if not final_assessment:
-            return {"explanation": "No assessment available to explain.", "steps": {**state["steps"], "6b_explanation_generation": {"status": "failed"}}}
+            return {
+                "explanation": "No assessment available to explain.",
+                "steps": {**state["steps"], "6b_explanation_generation": {"status": "completed", "explanation": "No assessment available."}}
+            }
 
-        # Extract triggers from final assessment if available
-        triggers = final_assessment.get("triggers", [])
-
+        triggers = final_assessment.get("triggers") or []
         explanation = Explainer.explain(final_assessment, trend, triggers)
 
         return {
             "explanation": explanation,
-            "steps": {**state["steps"], "6b_explanation_generation": {"status": "completed"}}
+            "steps": {**state["steps"], "6b_explanation_generation": {
+                "status": "completed",
+                "explanation": explanation
+            }}
         }
     except Exception as e:
-        logger.error(f"Explanation generation failed: {e}")
-        return {"workflow_status": "failed", "error": str(e)}
+        logger.warning(f"Explanation generation failed gracefully: {e}")
+        return {
+            "explanation": "Clinical risk assessment completed.",
+            "steps": {**state["steps"], "6b_explanation_generation": {
+                "status": "completed",
+                "warning": str(e)
+            }}
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -704,6 +748,18 @@ def _to_probability(value: Any) -> Optional[float]:
     return max(0.0, min(1.0, num))
 
 
+def _score_to_risk_level(score: float) -> str:
+    """Map numeric score to standardized risk level."""
+    if score >= 0.80:
+        return "Critical"
+    elif score >= 0.65:
+        return "High"
+    elif score >= 0.40:
+        return "Moderate"
+    else:
+        return "Low"
+
+
 def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = None) -> Dict:
     """
     Combine ML, abnormal labs, symptom severity, and trend trajectory into a final score.
@@ -713,12 +769,16 @@ def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = Non
     abnormal_weight = min(max(abnormal_count, 0) / 3.0, 1.0)
 
     ml_probability = _to_probability(
-        risk.get("risk_probability") or risk.get("risk_percentage")
+        risk.get("risk_probability")
+        or risk.get("risk_percentage")
+        or ((risk.get("score") / 100.0) if risk.get("score") is not None else None)
     )
     if ml_probability is None:
         ml_probability = 0.0
 
-    symptom_score = symptom.get("severity", 0.0)
+    symptom_score = symptom.get("severity_score")
+    if symptom_score is None:
+        symptom_score = symptom.get("severity", 0.0)
     try:
         symptom_score = float(symptom_score)
     except (TypeError, ValueError):
@@ -730,7 +790,7 @@ def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = Non
     if trend and trend.get("status") == "completed":
         trend_score = trend.get("trend_score", 0.0)
 
-    # Determine which formula to use based on history
+    # Determine which formula to use based on history (at least 2 visits total: 1 past + 1 current)
     has_history = (trend and trend.get("visits_used", 0) >= 2)
 
     if has_history:
@@ -750,7 +810,7 @@ def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = Non
         4
     )
 
-    final_risk = _score_to_risk_level(final_score)
+    final_risk = normalize_level(_score_to_risk_level(final_score))
 
     return {
         "risk_level": final_risk,
@@ -1135,19 +1195,64 @@ class MasterHealthAgent:
                 lines.append(f"   Error: {step.get('error', 'Unknown error')}")
             lines.append("")
 
+        # Step 5b — Trend Analysis
+        if "5b_trend_analysis" in steps:
+            step = steps["5b_trend_analysis"]
+            icon = "✅" if step["status"] == "completed" else "❌"
+            lines.append(f"{icon} Step 5b: Trend Analysis")
+            if step["status"] == "completed":
+                res = step.get("result", {})
+                lines.append(f"   Direction: {res.get('direction', 'stable')}")
+                lines.append(f"   Trend Score: {res.get('trend_score', 0.0)}")
+                lines.append(f"   Visits Analyzed: {res.get('visits_used', 1)}")
+            else:
+                lines.append(f"   Warning/Error: {step.get('warning') or step.get('error', 'N/A')}")
+            lines.append("")
+
+        # Step 5c — Differential Analysis
+        if "5c_differential_analysis" in steps:
+            step = steps["5c_differential_analysis"]
+            icon = "✅" if step["status"] == "completed" else "❌"
+            lines.append(f"{icon} Step 5c: Differential Diagnosis")
+            if step["status"] == "completed" and step.get("result"):
+                diff = step["result"]
+                lines.append(f"   Primary Hypothesis: {diff.get('primary', 'N/A')}")
+                lines.append(f"   Shared Symptoms: {', '.join(diff.get('shared_symptoms', [])) or 'None'}")
+            else:
+                lines.append("   Differential Analysis: Single condition assessed or no alternatives.")
+            lines.append("")
+
         # Step 6 — Result Fusion
         if "6_result_fusion" in steps:
             step = steps["6_result_fusion"]
             icon = "✅" if step["status"] == "completed" else "❌"
-            lines.append(f"{icon} Step 6: Merge Results")
+            lines.append(f"{icon} Step 6: Result Fusion")
 
             if step["status"] == "completed":
                 merged = step.get("final_assessment", {})
+                lines.append(f"   Winning Disease: {step.get('winning_disease', merged.get('disease', 'N/A'))}")
                 lines.append(f"   Final Risk: {merged.get('risk_level', 'N/A')}")
                 lines.append(f"   Final Score: {merged.get('score', 'N/A')}")
                 lines.append(f"   Formula: {merged.get('formula', 'N/A')}")
+                if "all_diseases" in step:
+                    lines.append("   All Evaluated Diseases:")
+                    for dname, dfusion in step["all_diseases"].items():
+                        lines.append(f"     • {dname.title()}: Score={dfusion.get('score')} | Risk={dfusion.get('risk_level')}")
             else:
                 lines.append(f"   Error: {step.get('error', 'Unknown error')}")
+            lines.append("")
+
+        # Step 6b — Explanation Generation
+        if "6b_explanation_generation" in steps:
+            step = steps["6b_explanation_generation"]
+            icon = "✅" if step["status"] == "completed" else "❌"
+            lines.append(f"{icon} Step 6b: Clinical Explanation")
+            if step["status"] == "completed":
+                expl = step.get("explanation", "")
+                for eline in expl.split("\n"):
+                    lines.append(f"   {eline}")
+            else:
+                lines.append(f"   Warning/Error: {step.get('warning') or step.get('error', 'N/A')}")
             lines.append("")
 
         # Step 7 — Alert Generation

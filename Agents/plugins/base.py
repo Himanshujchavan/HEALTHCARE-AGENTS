@@ -26,12 +26,12 @@ class DiseasePlugin(ABC):
         pass
 
     @abstractmethod
-    def rule_risk(self, data: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def rule_risk(self, data: Dict[str, Any], analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Deterministic scoring based on lab values."""
         pass
 
     @abstractmethod
-    def predict_risk(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def predict_risk(self, data: Dict[str, Any], analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """ML-based risk prediction, falls back to rule_risk."""
         pass
 

@@ -60,7 +60,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Internal imports (only available after sys.path is set above) ─────────────
-from agent.agent import build_agent  # noqa: E402
+try:
+    from agent.agent import build_agent  # noqa: E402
+except Exception as _e:
+    build_agent = None
 
 
 # ── Session store ─────────────────────────────────────────────────────────────
@@ -342,7 +345,12 @@ class RiskPredictorAgent:
         message = _build_message_from_analysis(analysis)
         logger.info(f"[RiskPredictorAgent] Built message from analysis: {message}")
 
-        result = run_risk_assessment(message)
+        try:
+            result = run_risk_assessment(message)
+        except Exception as e:
+            logger.warning(f"[RiskPredictorAgent] Conversational run_risk_assessment failed: {e}")
+            result = {"risk_level": None, "response": "", "success": False, "error": str(e)}
+
         lab_values = _extract_lab_values(analysis)
         lab_risk = None
 
@@ -391,6 +399,15 @@ def run_risk_assessment(message: str, session_id: Optional[str] = None) -> dict:
     """
     if not session_id or str(session_id).lower() == 'null':
         session_id = str(uuid.uuid4())
+
+    if build_agent is None:
+        return {
+            "session_id": session_id,
+            "response": "",
+            "risk_level": None,
+            "success": False,
+            "error": "Conversational agent dependencies not installed"
+        }
 
     if session_id not in _sessions:
         logger.info(f"[RiskPredictor] New session: {session_id}")
