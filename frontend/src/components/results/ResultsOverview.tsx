@@ -1,4 +1,4 @@
-import { AnalysisResult, HealthRecordResponse } from "../../models/health";
+import { AnalysisResult, HealthRecordResponse, UnifiedAssessment } from "../../models/health";
 import { RiskBadge } from "../shared/RiskBadge";
 import { SectionCard } from "../shared/SectionCard";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
@@ -9,143 +9,150 @@ interface ResultsOverviewProps {
   showSymptomSection?: boolean;
 }
 
+function valueOrMissing(value: unknown): string {
+  return value === null || value === undefined || value === "" ? "Not available" : String(value);
+}
+
+function DiseaseCard({ name, assessment }: {
+  name: string;
+  assessment?: UnifiedAssessment["assessments"]["diabetes"];
+}) {
+  const unavailable = !assessment || assessment.status === "unavailable";
+  return (
+    <SectionCard title={`${name} risk assessment`}>
+      {unavailable ? (
+        <p className="text-sm text-slate-600">Not enough data to assess this condition.</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-2xl font-semibold text-slate-900">{assessment.risk_level}</p>
+              <p className="text-xs text-slate-500">
+                {assessment.score === null || assessment.score === undefined
+                  ? "Score not available"
+                  : `Model score: ${assessment.score}`}
+              </p>
+            </div>
+            <RiskBadge level={assessment.risk_level} />
+          </div>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Factors</p>
+            {assessment.factors.length > 0 ? (
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
+                {assessment.factors.map((factor) => <li key={factor}>{factor}</li>)}
+              </ul>
+            ) : (
+              <p className="mt-2 text-sm text-slate-600">No contributing factors were returned.</p>
+            )}
+          </div>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
 export function ResultsOverview({ analysis, record, showSymptomSection = true }: ResultsOverviewProps) {
-  const riskLevel = (analysis?.risk_level as string) || "Unknown";
-  const alert = analysis?.alert as boolean | undefined;
-  const summary = (analysis?.summary as string) || "Summary not available yet.";
-  const report = (analysis?.report as string) || "";
-  const explanation = (analysis?.explanation as string) || "";
-  const trend = analysis?.trend_result as Record<string, any> | undefined;
-  const differential = analysis?.differential_result as Record<string, any> | undefined;
-  const error = (analysis?.error as string) || "";
-  const riskLabel = String(riskLevel || "Unknown");
-  const scoreValue = analysis?.score ?? analysis?.final_assessment?.score;
-  const normalizedScore =
-    typeof scoreValue === "number"
-      ? scoreValue > 1
-        ? scoreValue / 100
-        : scoreValue
-      : null;
-  const scoreText =
-    typeof normalizedScore === "number"
-      ? `${Math.round(normalizedScore * 100)}%`
-      : scoreValue
-      ? String(scoreValue)
-      : null;
+  const unified = analysis?.unified as unknown as UnifiedAssessment | undefined;
+  const legacyRisk = String(analysis?.risk_level ?? "Unavailable");
+  const trend = unified?.trend;
+  const trendChanges = (trend?.changes ?? {}) as Record<string, { direction?: string; delta?: number }>;
+  const alert = unified?.alerts?.[0];
+  const explanation = typeof unified?.explanation === "string"
+    ? unified.explanation
+    : String(analysis?.explanation ?? analysis?.report ?? "Explanation is not available.");
+  const trendScore = typeof trend?.trend_score === "number" ? trend.trend_score : 0;
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <SectionCard title="Risk level">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Assessment</p>
-            <h3 className="mt-2 text-2xl font-semibold text-slate-900">
-              {riskLevel} risk
-            </h3>
-            <p className="mt-2 text-sm text-slate-600">{summary}</p>
-            {scoreText && (
-              <p className="mt-2 text-sm font-semibold text-slate-700">
-                Score: {scoreText}
-              </p>
-            )}
-            {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
-            <div className="mt-4">
-              <RiskBadge level={riskLevel} />
-            </div>
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Alert status">
-          <div className="space-y-3">
-            <p className="text-sm text-slate-600">
-              {alert === undefined
-                ? "Alert status will update once the analysis completes."
-                : alert
-                ? "Immediate follow-up recommended."
-                : "No immediate alerts detected."}
-            </p>
-            {alert && (
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                Contact a healthcare professional if symptoms worsen.
-              </div>
-            )}
-          </div>
-        </SectionCard>
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+        {unified?.model_disclaimer ?? "Risk predictions support clinical review and are not confirmed medical diagnoses."}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <SectionCard title="HbA1c">
-          <p className="text-3xl font-semibold text-slate-900">{record?.hba1c ?? "--"}</p>
-          <p className="text-xs text-slate-500">Latest lab value</p>
-        </SectionCard>
-        <SectionCard title="Glucose">
-          <p className="text-3xl font-semibold text-slate-900">{record?.glucose ?? "--"}</p>
-          <p className="text-xs text-slate-500">mg/dL</p>
-        </SectionCard>
-        <SectionCard title="BMI">
-          <p className="text-3xl font-semibold text-slate-900">{record?.bmi ?? "--"}</p>
-          <p className="text-xs text-slate-500">Body mass index</p>
-        </SectionCard>
-      </div>
-
-      <SectionCard title="AI generated report">
-        <div className="space-y-4 text-sm text-slate-700">
-          <p>{report || "Your AI-generated preventive report will appear here."}</p>
+      {unified ? (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <DiseaseCard name="Diabetes" assessment={unified.assessments.diabetes} />
+          <DiseaseCard name="Cardiovascular" assessment={unified.assessments.cardiovascular} />
         </div>
-      </SectionCard>
+      ) : (
+        <SectionCard title="Risk assessment">
+          <div className="flex items-center justify-between">
+            <p className="text-2xl font-semibold text-slate-900">{legacyRisk}</p>
+            <RiskBadge level={legacyRisk} />
+          </div>
+        </SectionCard>
+      )}
+
+      <div className="grid gap-6 md:grid-cols-3">
+        {[
+          ["HbA1c", record?.hba1c, "%"],
+          ["Glucose", record?.glucose, "mg/dL"],
+          ["Blood pressure", record?.systolic_bp, "mmHg systolic"],
+          ["Cholesterol", record?.total_cholesterol, "mg/dL"],
+          ["Age", record?.age, "years"],
+          ["BMI", record?.bmi, "kg/m2"],
+        ].map(([label, value, unit]) => (
+          <SectionCard key={String(label)} title={String(label)}>
+            <p className="text-2xl font-semibold text-slate-900">{valueOrMissing(value)}</p>
+            <p className="text-xs text-slate-500">{String(unit)}</p>
+          </SectionCard>
+        ))}
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        <SectionCard title="Explanation">
-          <p className="text-sm text-slate-600">{explanation || report || "Explanation is not available yet."}</p>
-        </SectionCard>
-        <SectionCard title="Trend">
+        <SectionCard title="Trend comparison">
           <p className="mb-3 text-sm text-slate-600">
-            {trend?.status === "insufficient_history" ? "More visits are needed for a trend." : `${trend?.direction ?? "stable"} trend · ${trend?.visits_used ?? 0} visits`}
+            {trend?.status === "insufficient_history"
+              ? "No previous assessment is available for comparison."
+              : `${String(trend?.direction ?? "stable")} across ${String(trend?.visits_used ?? 0)} assessments`}
           </p>
           <ResponsiveContainer width="100%" height={100}>
-            <LineChart data={[{ name: "trend", value: Number(trend?.trend_score ?? 0) }]}>
+            <LineChart data={[{ name: "trend", value: trendScore }]}>
               <XAxis dataKey="name" hide />
               <YAxis domain={[0, 1]} hide />
               <Tooltip />
               <Line type="monotone" dataKey="value" stroke="#059669" strokeWidth={3} dot />
             </LineChart>
           </ResponsiveContainer>
+          <div className="mt-3 space-y-1 text-xs text-slate-600">
+            {Object.entries(trendChanges).map(([metric, change]) => (
+              <p key={metric}>{metric}: {change.direction ?? "stable"} ({change.delta ?? 0})</p>
+            ))}
+          </div>
         </SectionCard>
-        <SectionCard title="Differential">
-          {differential ? (
-            <div className="space-y-2 text-sm text-slate-600">
-              <p>Primary: <strong>{String(differential.primary ?? "Unknown")}</strong></p>
-              {(differential.alternatives ?? []).map((item: any) => (
-                <p key={String(item.disease)}>{String(item.disease)} · {Math.round(Number(item.score ?? 0) * 100)}%</p>
-              ))}
-            </div>
-          ) : <p className="text-sm text-slate-600">A differential is shown when multiple diseases are applicable.</p>}
+
+        <SectionCard title="Alert and next steps">
+          <p className="text-sm font-semibold text-slate-900">
+            {alert ? `${alert.severity} · ${alert.alert ? "Attention recommended" : "No immediate alert"}` : "No alert result"}
+          </p>
+          <p className="mt-2 text-sm text-slate-600">{alert?.explanation ?? "Alert details are not available."}</p>
+          {alert?.recommended_next_steps && (
+            <p className="mt-3 text-sm text-slate-700">{alert.recommended_next_steps}</p>
+          )}
+        </SectionCard>
+
+        <SectionCard title="Differential agent">
+          {unified?.differential.status === "completed" ? (
+            <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-xs text-slate-600">
+              {JSON.stringify(unified.differential.results, null, 2)}
+            </pre>
+          ) : (
+            <p className="text-sm text-slate-600">No valid differential result was returned.</p>
+          )}
         </SectionCard>
       </div>
 
+      <SectionCard title="Explanation">
+        <p className="text-sm leading-6 text-slate-700">{explanation}</p>
+      </SectionCard>
+
       {showSymptomSection && (
-        <SectionCard title="Symptom analysis">
+        <SectionCard title="Input status">
           <p className="text-sm text-slate-600">
-            {analysis?.symptom_summary
-              ? (analysis.symptom_summary as string)
-              : "Symptom alignment will appear once the analysis completes."}
+            Analysis date: {record?.created_at ? new Date(record.created_at).toLocaleString() : "Not available"}
+            {" · "}Workflow: {String(unified?.status ?? analysis?.workflow_status ?? "Not available")}
           </p>
         </SectionCard>
       )}
-
-      <SectionCard title="Report actions">
-        <div className="flex flex-wrap gap-3">
-          <button className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">
-            Download PDF
-          </button>
-          <button className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">
-            Save analysis
-          </button>
-          <button className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">
-            Share with doctor
-          </button>
-        </div>
-      </SectionCard>
     </div>
   );
 }

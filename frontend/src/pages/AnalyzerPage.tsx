@@ -58,6 +58,7 @@ export function AnalyzerPage() {
               const response = await manualMutation.mutateAsync(payload);
               setAnalysis({
                 ...(response.final_assessment ?? {}),
+                unified: response.unified ?? null,
                 risk_level: response.risk_level ?? response.final_assessment?.risk_level,
                 alert: response.alert ?? null,
                 report: response.report ?? null,
@@ -78,13 +79,14 @@ export function AnalyzerPage() {
           />
         ) : (
           <PdfUploadPanel
-            onSubmit={async (file, useLLM, symptoms, manualText) => {
+            onSubmit={async (file, useLLM, symptoms, manualText, disease) => {
               resetResults();
               const response = await uploadMutation.mutateAsync({
                 file,
                 useLLM,
                 symptoms,
                 manualText,
+                disease,
               });
               const extractedParams = (response.analysis?.parameters ?? {}) as Record<
                 string,
@@ -92,6 +94,7 @@ export function AnalyzerPage() {
               >;
               setAnalysis({
                 ...(response.analysis ?? {}),
+                unified: response.unified ?? null,
                 ...(response.final_assessment ?? {}),
                 ...(response.alert_result ?? {}),
                 risk_level:
@@ -104,7 +107,7 @@ export function AnalyzerPage() {
                 error: response.error,
               });
               setRecord({
-                id: 0,
+                id: response.record_id ?? 0,
                 user_id: 0,
                 hba1c: extractedParams.hba1c?.value,
                 glucose: extractedParams.glucose?.value,
@@ -129,6 +132,14 @@ export function AnalyzerPage() {
             </div>
           </SectionCard>
         </div>
+      )}
+
+      {(uploadMutation.isError || manualMutation.isError) && (
+        <SectionCard title="Analysis failed" className="border-red-200 bg-red-50">
+          <p className="text-sm text-red-700">
+            {(uploadMutation.error ?? manualMutation.error)?.message ?? "The report could not be analyzed."}
+          </p>
+        </SectionCard>
       )}
 
       {analysis && (

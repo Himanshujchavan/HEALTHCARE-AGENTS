@@ -13,10 +13,6 @@ interface ManualEntryFormProps {
 export function ManualEntryForm({ onSubmit, isLoading }: ManualEntryFormProps) {
   const { register, handleSubmit } = useForm<HealthInput>({
     defaultValues: {
-      hba1c: 0,
-      glucose: 0,
-      bmi: 0,
-      age: 0,
       symptoms: [],
       manual_text: "",
       use_llm: false,
@@ -53,7 +49,7 @@ export function ManualEntryForm({ onSubmit, isLoading }: ManualEntryFormProps) {
             : ["age", "systolic_bp", "diastolic_bp", "total_cholesterol", "ldl", "hdl", "smoker"];
           const selectedValues = Object.fromEntries(
             fields
-              .filter((field) => values[field as keyof HealthInput] !== undefined && values[field as keyof HealthInput] !== 0)
+              .filter((field) => values[field as keyof HealthInput] !== undefined && values[field as keyof HealthInput] !== null)
               .map((field) => [field, values[field as keyof HealthInput]]),
           ) as HealthInput;
           onSubmit({ ...selectedValues, symptoms, manual_text: values.manual_text, use_llm: values.use_llm });

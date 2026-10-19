@@ -69,10 +69,16 @@ export const useUploadReport = () => {
   return useMutation<
     UploadReportResponse,
     Error,
-    { file: File; useLLM?: boolean; symptoms?: string[]; manualText?: string }
+    {
+      file: File;
+      useLLM?: boolean;
+      symptoms?: string[];
+      manualText?: string;
+      disease?: "diabetes" | "cardiovascular";
+    }
   >({
     mutationFn: ({ file, useLLM, symptoms, manualText }) =>
-      healthApi.uploadHealthReport(file, useLLM, symptoms, manualText ?? ""),
+      healthApi.uploadHealthReport(file, useLLM, symptoms, manualText ?? "", disease),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: queryKeys.latest });
       client.invalidateQueries({ queryKey: ["health", "records"] });

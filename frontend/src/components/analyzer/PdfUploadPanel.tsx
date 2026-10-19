@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { HeartPulse, Syringe } from "lucide-react";
 import { SectionCard } from "../shared/SectionCard";
 import { SymptomSelector } from "./SymptomSelector";
 
@@ -8,6 +9,7 @@ interface PdfUploadPanelProps {
     useLLM: boolean,
     symptoms: string[],
     manualText: string,
+    disease: "diabetes" | "cardiovascular",
   ) => void;
   isLoading?: boolean;
 }
@@ -18,6 +20,7 @@ export function PdfUploadPanel({ onSubmit, isLoading }: PdfUploadPanelProps) {
   const [symptoms, setSymptoms] = useState<string[]>([]);
   const [customSymptom, setCustomSymptom] = useState("");
   const [manualText, setManualText] = useState("");
+  const [disease, setDisease] = useState<"diabetes" | "cardiovascular">("diabetes");
 
   const toggleSymptom = (symptom: string) => {
     setSymptoms((prev) =>
@@ -63,8 +66,41 @@ export function PdfUploadPanel({ onSubmit, isLoading }: PdfUploadPanelProps) {
           </div>
         )}
 
+        <div className="space-y-3">
+          <p className="text-sm font-semibold text-slate-900">Assessment focus</p>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => setDisease("diabetes")}
+              className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${
+                disease === "diabetes"
+                  ? "bg-emerald-600 text-white"
+                  : "border border-slate-200 text-slate-600"
+              }`}
+            >
+              <Syringe size={16} /> Diabetes
+            </button>
+            <button
+              type="button"
+              onClick={() => setDisease("cardiovascular")}
+              className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${
+                disease === "cardiovascular"
+                  ? "bg-emerald-600 text-white"
+                  : "border border-slate-200 text-slate-600"
+              }`}
+            >
+              <HeartPulse size={16} /> Cardiovascular
+            </button>
+          </div>
+          <p className="text-xs text-slate-500">
+            Choose which symptom profile should guide the report analysis.
+          </p>
+        </div>
+
         <div className="space-y-4">
-          <p className="text-sm font-semibold text-slate-900">Symptoms</p>
+          <p className="text-sm font-semibold text-slate-900">
+            {disease === "diabetes" ? "Diabetes symptoms" : "Cardiovascular symptoms"}
+          </p>
           <SymptomSelector
             selected={symptoms}
             onToggle={toggleSymptom}
@@ -97,7 +133,7 @@ export function PdfUploadPanel({ onSubmit, isLoading }: PdfUploadPanelProps) {
         <button
           type="button"
           disabled={!file || isLoading}
-          onClick={() => file && onSubmit(file, useLLM, symptoms, manualText)}
+          onClick={() => file && onSubmit(file, useLLM, symptoms, manualText, disease)}
           className="rounded-full bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-emerald-200"
         >
           {isLoading ? "Analyzing..." : "Analyze report"}

@@ -93,6 +93,23 @@ class TrendAgent:
                 overall_direction = param_direction
 
         total_visits = len(history) + 1
+        changes = {}
+        for param in plugin.trend_scales:
+            current_value = _extract_param_value({"params": current}, param)
+            previous_value = next(
+                (_extract_param_value(h, param) for h in reversed(history)
+                 if _extract_param_value(h, param) is not None),
+                None,
+            )
+            if current_value is None or previous_value is None:
+                continue
+            delta = round(current_value - previous_value, 4)
+            changes[param] = {
+                "previous": previous_value,
+                "current": current_value,
+                "delta": delta,
+                "direction": "increased" if delta > 0 else "decreased" if delta < 0 else "stable",
+            }
 
         return {
             "trend_score": round(max_delta_score, 4),
@@ -100,4 +117,5 @@ class TrendAgent:
             "rising_but_normal": rising_but_normal,
             "visits_used": total_visits,
             "status": "completed"
+            ,"changes": changes
         }

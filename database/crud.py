@@ -145,6 +145,7 @@ def get_history(db: Session, user_id: int, exclude_id: int | None = None, limit:
         .limit(limit)
         .all()
     )
+    history.reverse()
     result: List[dict] = []
     for rec in history:
         entry: dict = {"created_at": rec.created_at, "params": {}}
@@ -162,4 +163,3 @@ def get_history(db: Session, user_id: int, exclude_id: int | None = None, limit:
                 pass
         result.append(entry)
     return result
-

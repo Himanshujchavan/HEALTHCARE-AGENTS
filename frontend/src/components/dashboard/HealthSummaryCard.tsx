@@ -6,7 +6,7 @@ interface HealthSummaryCardProps {
 }
 
 export function HealthSummaryCard({ latest }: HealthSummaryCardProps) {
-  const riskLevel = (latest?.analysis?.risk_level as string) || "Unknown";
+  const riskLevel = (latest?.analysis?.risk_level as string) || "Unavailable";
   const alert = latest?.analysis?.alert as boolean | undefined;
   const lastDate = latest?.record?.created_at
     ? new Date(latest.record.created_at).toLocaleDateString()
@@ -26,13 +26,13 @@ export function HealthSummaryCard({ latest }: HealthSummaryCardProps) {
         <div>
           <p className="text-xs uppercase text-slate-400">HbA1c</p>
           <p className="text-lg font-semibold text-slate-900">
-            {latest?.record?.hba1c ?? "--"}
+            {latest?.record?.hba1c ?? "Not available"}
           </p>
         </div>
         <div>
           <p className="text-xs uppercase text-slate-400">Glucose</p>
           <p className="text-lg font-semibold text-slate-900">
-            {latest?.record?.glucose ?? "--"}
+            {latest?.record?.glucose ?? "Not available"}
           </p>
         </div>
         <div>
@@ -42,7 +42,7 @@ export function HealthSummaryCard({ latest }: HealthSummaryCardProps) {
         <div>
           <p className="text-xs uppercase text-slate-400">Alert</p>
           <p className="text-sm font-medium text-slate-900">
-            {alert === undefined ? "Unknown" : alert ? "Triggered" : "Clear"}
+            {alert === undefined ? "Not available" : alert ? "Triggered" : "Clear"}
           </p>
         </div>
       </div>

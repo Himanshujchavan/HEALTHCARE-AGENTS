@@ -69,7 +69,8 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
             <div>
               <p className="text-sm font-semibold text-slate-900">Report #{report.id} · {report.disease ?? "Health"}</p>
               <p className="text-xs text-slate-500">
-                {new Date(report.created_at).toLocaleDateString()} · HbA1c {report.hba1c}
+                {new Date(report.created_at).toLocaleDateString()} · HbA1c {report.hba1c ?? "Not available"} ·
+                {" "}Glucose {report.glucose ?? "Not available"} · BP {report.systolic_bp ?? "Not available"}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">

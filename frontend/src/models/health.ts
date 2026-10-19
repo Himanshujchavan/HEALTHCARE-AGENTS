@@ -2,6 +2,38 @@ import { JsonValue } from "./common";
 
 export type RiskLevel = "Low" | "Moderate" | "High" | "Critical" | "Unknown" | string;
 
+export interface DiseaseAssessment {
+  status: "completed" | "partial" | "unavailable" | string;
+  risk_level: string;
+  score?: number | null;
+  factors: string[];
+  analysis?: Record<string, JsonValue>;
+  risk?: Record<string, JsonValue>;
+  trend?: Record<string, JsonValue>;
+  final_assessment?: Record<string, JsonValue>;
+}
+
+export interface UnifiedAssessment {
+  assessment_id?: number | null;
+  status: string;
+  assessments: {
+    diabetes: DiseaseAssessment;
+    cardiovascular: DiseaseAssessment;
+  };
+  differential: { status: string; results: Record<string, JsonValue> | JsonValue[] };
+  trend: Record<string, JsonValue>;
+  alerts: Array<{
+    severity: string;
+    alert: boolean;
+    explanation?: string | null;
+    recommended_next_steps?: string | null;
+    triggers?: string[];
+  }>;
+  explanation: string | Record<string, JsonValue>;
+  created_at?: string | null;
+  model_disclaimer: string;
+}
+
 export interface HealthInput {
   hba1c?: number;
   glucose?: number;
@@ -35,6 +67,7 @@ export interface HealthRecordResponse {
   created_at: string;
   analyzed: boolean;
   analysis_result?: string | null;
+  unified?: UnifiedAssessment | null;
 }
 
 export interface HealthDataSubmitResponse {
@@ -52,6 +85,7 @@ export interface HealthDataSubmitResponse {
   trend?: Record<string, JsonValue> | null;
   differential?: Record<string, JsonValue> | null;
   disease_results?: Record<string, JsonValue> | null;
+  unified?: UnifiedAssessment | null;
 }
 
 export interface AnalysisResult {
@@ -75,6 +109,7 @@ export interface LatestRecordResponse {
   };
   analysis?: AnalysisResult;
   summary?: string;
+  unified?: UnifiedAssessment;
 }
 
 export interface UploadReportResponse {
@@ -91,8 +126,10 @@ export interface UploadReportResponse {
   alert?: boolean | null;
   report?: string | null;
   error?: string | null;
+  record_id?: number;
+  unified?: UnifiedAssessment;
   steps?: Record<string, JsonValue>;
-  [key: string]: JsonValue | string[] | AnalysisResult | Record<string, JsonValue> | undefined;
+  [key: string]: JsonValue | string[] | AnalysisResult | Record<string, JsonValue> | UnifiedAssessment | undefined;
 }
 
 export interface ReanalyzeResponse {

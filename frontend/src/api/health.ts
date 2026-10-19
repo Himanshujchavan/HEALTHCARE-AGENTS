@@ -8,6 +8,7 @@ import {
   ReanalyzeResponse,
   DeleteRecordResponse,
   UploadReportResponse,
+  UnifiedAssessment,
 } from "../models/health";
 
 export async function uploadHealthReport(
@@ -15,6 +16,7 @@ export async function uploadHealthReport(
   useLLM: boolean = false,
   symptoms: string[] = [],
   manualText: string = "",
+  disease: "diabetes" | "cardiovascular" = "diabetes",
 ): Promise<UploadReportResponse> {
   const formData = new FormData();
   formData.append("file", file);
@@ -22,6 +24,7 @@ export async function uploadHealthReport(
   if (manualText.trim()) {
     formData.append("manual_text", manualText.trim());
   }
+  formData.append("disease", disease);
 
   const response = await http.post<UploadReportResponse>(
     "/api/v1/health/upload-report",
@@ -75,6 +78,13 @@ export async function getHealthRecords(
 export async function getLatestRecord(): Promise<LatestRecordResponse> {
   const response = await http.get<LatestRecordResponse>("/api/v1/health/latest");
   return response.data;
+}
+
+export async function getUnifiedAssessment(recordId: number): Promise<UnifiedAssessment> {
+  const response = await http.get<{ unified: UnifiedAssessment }>(
+    `/api/v1/health/health-data/${recordId}/analysis`,
+  );
+  return response.data.unified;
 }
 
 export async function reanalyzeRecord(recordId: number): Promise<ReanalyzeResponse> {

@@ -150,9 +150,22 @@ class HealthDataSubmitResponse(BaseModel):
     trend: Optional[Dict[str, Any]] = None
     differential: Optional[Dict[str, Any]] = None
     disease_results: Optional[Dict[str, Any]] = None
+    unified: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
+
+
+class UnifiedAssessmentResponse(BaseModel):
+    assessment_id: Optional[int] = None
+    status: str
+    assessments: Dict[str, Any]
+    differential: Dict[str, Any]
+    trend: Dict[str, Any]
+    alerts: List[Dict[str, Any]]
+    explanation: Any
+    created_at: Optional[datetime] = None
+    model_disclaimer: str
 
 
 class UserCreate(BaseModel):

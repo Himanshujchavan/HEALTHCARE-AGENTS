@@ -33,6 +33,7 @@ from Agents.reportanalyzer import ReportAnalyzerAgent
 from Agents.masterhealth import MasterHealthAgent
 from Agents.alertsystem import AlertAgent
 from Agents.symptomchecker import analyze_symptoms
+from Agents.contracts import build_unified_response
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,9 @@ async def upload_health_report(
     use_llm: bool = False,
     symptoms: List[str] = Form(default_factory=list),
     manual_text: str | None = Form(default=None),
+    disease: str = Form(default="diabetes"),
     user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Upload a PDF lab report and run it through the master health workflow.
 
@@ -110,11 +113,13 @@ async def upload_health_report(
 
         logger.info("PDF report uploaded by user %s: %s", user.id, stored_path)
 
+        history = get_history(db, user.id, limit=10)
         workflow_result = master_agent.process_pdf_report(
             pdf_path=str(stored_path),
             use_llm=use_llm,
             symptoms=symptoms or [],
             manual_text=manual_text,
+            history=history,
         )
 
         steps = workflow_result.get("steps", {})
@@ -127,6 +132,33 @@ async def upload_health_report(
             or list(analysis_result.get("parameters", {}).keys())
         )
 
+        extracted_data = {
+            key: (value.get("value") if isinstance(value, dict) else value)
+            for key, value in (analysis_result.get("parameters") or {}).items()
+            if value is not None
+        }
+        record = HealthRecord(
+            user_id=user.id,
+            hba1c=extracted_data.get("hba1c"),
+            glucose=extracted_data.get("glucose"),
+            bmi=extracted_data.get("bmi"),
+            age=extracted_data.get("age"),
+            systolic_bp=extracted_data.get("systolic_bp"),
+            diastolic_bp=extracted_data.get("diastolic_bp"),
+            total_cholesterol=extracted_data.get("total_cholesterol"),
+            ldl=extracted_data.get("ldl"),
+            hdl=extracted_data.get("hdl"),
+            smoker=extracted_data.get("smoker"),
+            symptoms=json.dumps(symptoms) if symptoms else None,
+            manual_text=manual_text,
+            analyzed=bool(workflow_result.get("workflow_status") == "completed"),
+            analysis_result=json.dumps(workflow_result),
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        unified = build_unified_response(workflow_result, record.id, record.created_at.isoformat())
+
         return {
             "status": "success",
             "message": "PDF processed through the master health workflow",
@@ -134,6 +166,9 @@ async def upload_health_report(
             "stored_path": str(stored_path),
             "extracted_parameters": extracted_parameters,
             "analysis": analysis_result,
+            "record_id": record.id,
+            "disease": disease,
+            "unified": unified,
             **workflow_result,
         }
 
@@ -203,6 +238,9 @@ async def submit_health_data(
 
         # Step 5: Store workflow result
         update_health_record_analysis(db, record.id, json.dumps(workflow_result))
+        unified = build_unified_response(
+            workflow_result, record.id, record.created_at.isoformat()
+        )
         
         logger.info(f"Health record created successfully: ID={record.id}")
         
@@ -222,6 +260,7 @@ async def submit_health_data(
             trend=workflow_result.get("trend_result"),
             differential=workflow_result.get("differential_result"),
             disease_results=workflow_result.get("disease_results"),
+            unified=unified,
         )
     
     except Exception as e:
@@ -338,6 +377,9 @@ async def get_health_data_analysis(
         
         # Add summary for legacy or master workflow result
         analysis["summary"] = _build_analysis_summary(analysis)
+        analysis["unified"] = build_unified_response(
+            analysis, record.id, record.created_at.isoformat()
+        )
         
         return {
             "record_id": record_id,
@@ -430,6 +472,12 @@ async def get_latest_record(
                 "glucose": record.glucose,
                 "bmi": record.bmi,
                 "age": record.age,
+                "systolic_bp": record.systolic_bp,
+                "diastolic_bp": record.diastolic_bp,
+                "total_cholesterol": record.total_cholesterol,
+                "ldl": record.ldl,
+                "hdl": record.hdl,
+                "smoker": record.smoker,
                 "created_at": record.created_at
             }
         }
@@ -438,6 +486,9 @@ async def get_latest_record(
         if record.analyzed and record.analysis_result:
             analysis = json.loads(record.analysis_result)
             response["analysis"] = analysis
+            response["unified"] = build_unified_response(
+                analysis, record.id, record.created_at.isoformat()
+            )
             response["summary"] = _build_analysis_summary(analysis)
         
         return response
