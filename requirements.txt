@@ -5,11 +5,12 @@ langchain==0.3.25
 langchain-core==0.3.59
 langchain-community==0.3.24
 langchain-openai==0.3.16
-langchain-ollama
+langchain-ollama==0.3.2
+langchain-text-splitters==0.3.8
 langgraph==0.2.56
 langsmith==0.3.45
 openai==1.79.0
-ollama
+ollama==0.6.3
 
 # =========================
 # Embeddings / Vector DB
@@ -49,7 +50,7 @@ pandas==2.2.3
 scikit-learn==1.6.1
 scipy==1.15.2
 xgboost==2.1.4
-langchain-groq
+langchain-groq==0.3.2
 # =========================
 # PDF / Image Processing
 # =========================

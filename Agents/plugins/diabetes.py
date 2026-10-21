@@ -104,10 +104,17 @@ class DiabetesPlugin(DiseasePlugin):
             if risk.get("success") is not False and not risk.get("error"):
                 risk["risk_level"] = normalize_level(risk.get("risk_level", "Low"))
                 return risk
+            error = risk.get("error") or "Risk predictor returned an unsuccessful result"
+            fallback = self.rule_risk(data, analysis)
+            fallback["fallback_reason"] = error
+            logger.warning("RiskPredictorAgent returned an error; using rule-based fallback: %s", error)
+            return fallback
         except Exception as e:
-            logger.debug(f"RiskPredictorAgent failed in DiabetesPlugin: {e}")
+            logger.warning("RiskPredictorAgent failed; using rule-based fallback: %s", e)
 
-        return self.rule_risk(data, analysis)
+            fallback = self.rule_risk(data, analysis)
+            fallback["fallback_reason"] = str(e)
+            return fallback
 
     def score_symptoms(self, symptoms: List[str]) -> Dict[str, Any]:
         match_count = 0

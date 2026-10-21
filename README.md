@@ -471,7 +471,14 @@ DATABASE_URL=sqlite:///./health_app.db
 SECRET_KEY=change-this-in-production
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
+LOG_LEVEL=INFO
+# Required only when explicitly enabling the hosted LLM path:
+# GROQ_API_KEY=your-groq-api-key
 ```
+
+Risk prediction is deterministic by default. Set `use_llm` to `true` for a
+request only when the required model provider is configured; provider failures
+are logged and returned as explicit workflow fallback metadata.
 
 ### 4. Start the backend
 
@@ -575,4 +582,3 @@ Already validated during development:
 - master workflow executed end-to-end
 - symptom stage, merge stage, and alert stage executed successfully
 - a dedicated API route that exposes the complete master-agent orchestration response directly to the frontend
-
