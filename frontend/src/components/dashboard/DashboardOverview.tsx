@@ -4,6 +4,8 @@ import { QuickActions } from "./QuickActions";
 import { RecentReports } from "./RecentReports";
 import { SectionCard } from "../shared/SectionCard";
 import { SectionHeader } from "../shared/SectionHeader";
+import { StatusBadge } from "../shared/StatusBadge";
+import { AgentStatusPanel } from "./AgentStatus";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 interface DashboardOverviewProps {
@@ -29,20 +31,36 @@ export function DashboardOverview({ latest, reports }: DashboardOverviewProps) {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        {(["diabetes", "cardiovascular"] as const).map((disease) => {
-          const assessment = unified?.assessments[disease];
+        {Object.entries(unified?.assessments ?? {}).map(([disease, assessment]) => {
+          const assessed =
+            assessment?.status === "completed" ||
+            assessment?.status === "completed_with_errors" ||
+            assessment?.status === "partial";
           return (
             <SectionCard key={disease} title={`${disease === "diabetes" ? "Diabetes" : "Cardiovascular"} summary`}>
-              <p className="text-2xl font-semibold text-slate-900">
-                {assessment?.status === "unavailable" ? "Not assessed" : assessment?.risk_level ?? "Not available"}
-              </p>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-2xl font-semibold text-slate-900">
+                  {assessed ? assessment?.risk_level : "Not assessed"}
+                </p>
+                <StatusBadge status={assessment?.status ?? "unavailable"} />
+              </div>
               <p className="mt-2 text-sm text-slate-600">
-                {assessment?.factors?.length ? assessment.factors.join(", ") : "No contributing factors returned."}
+                {assessment?.factors?.length
+                  ? assessment.factors.join(", ")
+                  : assessed
+                    ? "No contributing factors returned."
+                    : assessment?.reason ?? "No contributing factors returned."}
               </p>
             </SectionCard>
           );
         })}
       </div>
+
+      {unified?.agent_status && Object.keys(unified.agent_status).length > 0 && (
+        <SectionCard title="Agent status">
+          <AgentStatusPanel agentStatus={unified.agent_status} />
+        </SectionCard>
+      )}
 
       <SectionCard title="Recent reports">
         <RecentReports reports={reports} />

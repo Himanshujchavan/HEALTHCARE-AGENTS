@@ -1,20 +1,67 @@
 import { useMemo, useState } from "react";
-import { HealthRecordResponse } from "../../models/health";
+import { AssessmentHistoryItem } from "../../models/health";
 import { SectionCard } from "../shared/SectionCard";
+import { StatusBadge } from "../shared/StatusBadge";
 
 interface HistoryListProps {
-  reports?: HealthRecordResponse[];
+  items?: AssessmentHistoryItem[];
   onReanalyze?: (recordId: number) => void;
   onView?: (recordId: number) => void;
   onDelete?: (recordId: number) => void;
 }
 
-export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryListProps) {
+const DISEASE_LABELS: Record<string, string> = {
+  diabetes: "Diabetes",
+  cardiovascular: "Cardiovascular",
+};
+
+function parameterSummary(parameters: AssessmentHistoryItem["parameters"]): string {
+  const parts: string[] = [];
+  const hba1c = parameters.hba1c;
+  const glucose = parameters.glucose;
+  const systolic = parameters.systolic_bp;
+
+  if (hba1c !== undefined && hba1c !== null) {
+    parts.push(`HbA1c ${hba1c}`);
+  }
+  if (glucose !== undefined && glucose !== null) {
+    parts.push(`Glucose ${glucose}`);
+  }
+  if (systolic !== undefined && systolic !== null) {
+    parts.push(`BP ${systolic}`);
+  }
+
+  return parts.length > 0 ? parts.join(" · ") : "No parameters recorded";
+}
+
+/** One entry per condition, with the level the condition was given. */
+function DiseaseChips({ diseases }: { diseases: AssessmentHistoryItem["diseases"] }) {
+  const entries = Object.entries(diseases ?? {});
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {entries.map(([name, entry]) => (
+        <span
+          key={name}
+          className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600"
+        >
+          <span className="font-semibold">{DISEASE_LABELS[name] ?? name}</span>
+          <span>{String(entry?.risk_level ?? "Not assessed")}</span>
+          {entry?.status && <StatusBadge status={String(entry.status)} />}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export function HistoryList({ items, onReanalyze, onView, onDelete }: HistoryListProps) {
   const [query, setQuery] = useState("");
   const [sortDir, setSortDir] = useState("desc");
 
   const filtered = useMemo(() => {
-    const list = reports ?? [];
+    const list = items ?? [];
     const q = query.trim().toLowerCase();
     const sorted = [...list].sort((a, b) =>
       sortDir === "desc"
@@ -26,13 +73,15 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
       return sorted;
     }
 
-    return sorted.filter((report) =>
-      `${report.id}`.includes(q) ||
-      `${report.disease ?? ""}`.toLowerCase().includes(q) ||
-      `${report.hba1c ?? ""}`.includes(q) ||
-      `${report.glucose ?? ""}`.includes(q),
+    return sorted.filter((item) =>
+      `${item.record_id}`.includes(q) ||
+      `${item.disease ?? ""}`.toLowerCase().includes(q) ||
+      `${item.risk_level ?? ""}`.toLowerCase().includes(q) ||
+      `${item.status ?? ""}`.toLowerCase().includes(q) ||
+      `${item.parameters.hba1c ?? ""}`.includes(q) ||
+      `${item.parameters.glucose ?? ""}`.includes(q),
     );
-  }, [reports, query, sortDir]);
+  }, [items, query, sortDir]);
 
   return (
     <SectionCard title="History">
@@ -41,7 +90,7 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
           type="text"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search by report ID or metric"
+          placeholder="Search by report ID, condition or metric"
           className="flex-1 rounded-xl border border-slate-200 px-4 py-2 text-sm"
         />
         <select
@@ -61,29 +110,38 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
           </div>
         )}
 
-        {filtered.map((report) => (
+        {filtered.map((item) => (
           <div
-            key={report.id}
+            key={item.record_id}
             className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/80 px-5 py-4 md:flex-row md:items-center md:justify-between"
           >
             <div>
-              <p className="text-sm font-semibold text-slate-900">Report #{report.id} · {report.disease ?? "Health"}</p>
-              <p className="text-xs text-slate-500">
-                {new Date(report.created_at).toLocaleDateString()} · HbA1c {report.hba1c ?? "Not available"} ·
-                {" "}Glucose {report.glucose ?? "Not available"} · BP {report.systolic_bp ?? "Not available"}
+              <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-900">
+                Report #{item.record_id} · {item.disease ?? "Health"} ·{" "}
+                {item.risk_level ?? "Not assessed"}
+                <StatusBadge status={item.status} />
               </p>
+              <p className="text-xs text-slate-500">
+                {new Date(item.created_at).toLocaleDateString()} ·{" "}
+                {parameterSummary(item.parameters)}
+                {item.score !== null && item.score !== undefined
+                  ? ` · score ${item.score}`
+                  : ""}
+                {item.source === "report" ? " · from report" : ""}
+              </p>
+              <DiseaseChips diseases={item.diseases} />
             </div>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => onView?.(report.id)}
+                onClick={() => onView?.(item.record_id)}
                 className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600"
               >
                 View report
               </button>
               <button
                 type="button"
-                onClick={() => onReanalyze?.(report.id)}
+                onClick={() => onReanalyze?.(item.record_id)}
                 className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-800"
               >
                 Re-analyze
@@ -96,10 +154,10 @@ export function HistoryList({ reports, onReanalyze, onView, onDelete }: HistoryL
                   }
 
                   const confirmed = window.confirm(
-                    `Delete report #${report.id}? This cannot be undone.`,
+                    `Delete report #${item.record_id}? This cannot be undone.`,
                   );
                   if (confirmed) {
-                    onDelete(report.id);
+                    onDelete(item.record_id);
                   }
                 }}
                 className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600"

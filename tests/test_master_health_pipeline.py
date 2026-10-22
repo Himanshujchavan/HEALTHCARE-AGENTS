@@ -1,5 +1,6 @@
 from Agents.reportanalyzer import analyze_health_data
 from Agents.masterhealth import (
+    MasterHealthAgent,
     _rule_based_risk,
     _to_probability,
     _derive_symptom_metrics,
@@ -69,5 +70,49 @@ def test_full_agents_pipeline():
     })
 
     assert "report" in alert
-    # Any valid mapped risk level from the pipeline is acceptable
-    assert alert["risk_level"] in ["Low", "Moderate", "High", "Critical"]
+    # The expected level for this case is fixed, not "any valid level".
+    assert risk_level == "Critical"
+    assert alert["risk_level"] == "Critical"
+
+
+def test_orchestrated_pipeline_matches_the_manual_pipeline():
+    """The LangGraph workflow reproduces the documented manual fusion."""
+    health_data = {
+        "hba1c": 6.8,
+        "glucose": 148,
+        "bmi": 29,
+        "age": 45,
+    }
+    symptoms = [
+        "Fatigue / Low energy",
+        "Polyuria (frequent urination)",
+    ]
+
+    analysis = analyze_health_data(health_data)
+    risk = _rule_based_risk(analysis, health_data)
+    ml_probability = _to_probability(
+        risk.get("risk_probability") or risk.get("risk_percentage")
+    )
+    symptom_result = analyze_symptoms(
+        symptoms=symptoms,
+        report_context=analysis,
+        risk_context=risk,
+        manual_text="",
+        use_llm=False,
+    )
+    symptom_result.update(_derive_symptom_metrics(symptom_result))
+
+    expected_score = (
+        (ml_probability * 0.6)
+        + (min(analysis["abnormal_count"] / 3.0, 1.0) * 0.3)
+        + (symptom_result["severity_score"] * 0.1)
+    )
+
+    agent = MasterHealthAgent()
+    result = agent.process_health_data(health_data, symptoms=symptoms)
+    final = result["final_assessment"]
+
+    assert final["score"] == round(expected_score, 4)
+    assert final["risk_level"] == _score_to_risk_level(expected_score)
+    assert result["risk_level"] == final["risk_level"]
+    assert result["alert_result"]["risk_level"] == final["risk_level"]

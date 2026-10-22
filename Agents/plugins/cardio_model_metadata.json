@@ -1,0 +1,157 @@
+{
+  "data_source": "data/Cardiovascular_Disease_Dataset.csv",
+  "data_documentation": "data/README.md",
+  "training_rows": 1000,
+  "variants": [
+    "base",
+    "extended"
+  ],
+  "base_features": [
+    "age",
+    "systolic_bp",
+    "total_cholesterol"
+  ],
+  "optional_features": [
+    "chest_pain_type",
+    "st_slope"
+  ],
+  "feature_mapping": {
+    "age": {
+      "column": "age",
+      "unit": "years",
+      "description": "Patient age."
+    },
+    "systolic_bp": {
+      "column": "restingBP",
+      "unit": "mmHg",
+      "description": "Resting blood pressure (systolic)."
+    },
+    "total_cholesterol": {
+      "column": "serumcholestrol",
+      "unit": "mg/dL",
+      "description": "Serum cholesterol."
+    },
+    "chest_pain_type": {
+      "column": "chestpain",
+      "unit": "category (0-3)",
+      "description": "Chest pain type, ordered from no characteristic pain to asymptomatic. Ordinal code from the source dataset."
+    },
+    "st_slope": {
+      "column": "slope",
+      "unit": "category (0-3)",
+      "description": "Peak-exercise ST segment slope, ordered from downsloping to upsloping. Ordinal code from the source dataset."
+    }
+  },
+  "unavailable_features": {
+    "smoker": "The dataset has no smoking column. The value is not fabricated and not assumed to be zero, so the model score is independent of smoking status.",
+    "diastolic_bp": "Not present in the dataset.",
+    "ldl": "Not present in the dataset.",
+    "hdl": "Not present in the dataset.",
+    "bmi": "Not present in the dataset.",
+    "glucose": "'fastingbloodsugar' is a binary flag for fasting glucose above 120 mg/dL, not a glucose concentration, so it is not the same quantity as the API's 'glucose'."
+  },
+  "dataset_only_columns": {
+    "gender": "Sex; not accepted by the API.",
+    "restingrelectro": "Resting ECG result; not accepted by the API.",
+    "maxheartrate": "Maximum heart rate; not accepted by the API.",
+    "exerciseangia": "Exercise-induced angina; not accepted by the API.",
+    "oldpeak": "ST depression; not accepted by the API.",
+    "noofmajorvessels": "Major vessels coloured by fluoroscopy; not accepted by the API.",
+    "fastingbloodsugar": "Binary fasting-glucose flag; not accepted by the API."
+  },
+  "label": "target",
+  "target_semantics": "target = 1 means the patient is recorded as having cardiovascular disease in a cross-sectional dataset. It carries no time horizon, so the model's probability is a disease likelihood and NOT a 10-year or any other time-to-event risk estimate.",
+  "metrics": {
+    "base": {
+      "features": [
+        "age",
+        "systolic_bp",
+        "total_cholesterol"
+      ],
+      "test": {
+        "rows": 200,
+        "accuracy": 0.77,
+        "precision": 0.7917,
+        "recall": 0.819,
+        "f1": 0.8051,
+        "roc_auc": 0.8251,
+        "average_precision": 0.8391,
+        "brier": 0.1664,
+        "confusion_matrix": {
+          "true_negative": 59,
+          "false_positive": 25,
+          "false_negative": 21,
+          "true_positive": 95
+        }
+      },
+      "cross_validation": {
+        "folds": 5,
+        "roc_auc": 0.8004,
+        "accuracy": 0.763,
+        "average_precision": 0.8097,
+        "brier": 0.1777
+      },
+      "baseline": {
+        "prevalence": 0.58,
+        "accuracy_of_always_positive": 0.58
+      },
+      "confidence": "moderate",
+      "confidence_basis": "1000 training rows and a cross-validated ROC-AUC of 0.800: real but modest discrimination. The confidence is capped at 'moderate' because the dataset's labels are rule-derived, so the metrics cannot establish clinical validity."
+    },
+    "extended": {
+      "features": [
+        "age",
+        "systolic_bp",
+        "total_cholesterol",
+        "chest_pain_type",
+        "st_slope"
+      ],
+      "test": {
+        "rows": 200,
+        "accuracy": 0.955,
+        "precision": 0.9652,
+        "recall": 0.9569,
+        "f1": 0.961,
+        "roc_auc": 0.9893,
+        "average_precision": 0.9917,
+        "brier": 0.0361,
+        "confusion_matrix": {
+          "true_negative": 80,
+          "false_positive": 4,
+          "false_negative": 5,
+          "true_positive": 111
+        }
+      },
+      "cross_validation": {
+        "folds": 5,
+        "roc_auc": 0.9842,
+        "accuracy": 0.941,
+        "average_precision": 0.9871,
+        "brier": 0.0461
+      },
+      "baseline": {
+        "prevalence": 0.58,
+        "accuracy_of_always_positive": 0.58
+      },
+      "confidence": "moderate",
+      "confidence_basis": "1000 training rows and a cross-validated ROC-AUC of 0.984. Capped at 'moderate' because the dataset's labels are rule-derived, so the metrics cannot establish clinical validity."
+    }
+  },
+  "random_state": 42,
+  "confidence": "moderate",
+  "confidence_basis": "1000 training rows and a cross-validated ROC-AUC of 0.800: real but modest discrimination. The confidence is capped at 'moderate' because the dataset's labels are rule-derived, so the metrics cannot establish clinical validity.",
+  "limitations": [
+    "The dataset's labels are rule-derived rather than observed clinical outcomes, so held-out metrics measure how well the model recovers the generating rule and do not establish clinical validity.",
+    "The target is cross-sectional: the output is a disease likelihood, not a time-to-event risk estimate, and must not be presented as a 10-year risk.",
+    "Smoking status is absent from the training data, so the model cannot account for it; the rule-based scorer does, and reports an unknown smoking status differently from a confirmed non-smoker.",
+    "The extended model needs both chest pain type and ST slope. A case that supplies only one of them is scored by the weaker base model, so the reported confidence does not depend on how the case was filled in.",
+    "The dataset still has columns the API does not accept (resting ECG, maximum heart rate, exercise angina, ST depression, vessels coloured), which carry part of the label's signal.",
+    "The dataset is small relative to clinical risk models and comes from a single source population, so performance on other populations is unknown.",
+    "The dataset licence could not be independently verified for this copy."
+  ],
+  "trained_at": "2026-10-22T03:31:17+00:00",
+  "environment": {
+    "python": "3.12.2",
+    "scikit_learn": "1.6.1"
+  }
+}

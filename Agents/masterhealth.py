@@ -24,7 +24,6 @@ from datetime import datetime
 from pathlib import Path
 
 from langgraph.graph import StateGraph, END, START
-from typing_extensions import TypedDict
 
 # Import sub-agents
 from Agents.plugins.registry import applicable, register
@@ -36,6 +35,21 @@ from Agents.differentialagent import DifferentialAgent
 from Agents.explainer import Explainer
 from Agents.reportanalyzer import ReportAnalyzerAgent
 from Agents.alertsystem import AlertAgent
+from Agents.contracts import (
+    HealthWorkflowState,
+    agent_status as _agent_status,
+    fuse_results,
+    normalize_analysis_result,
+    normalize_risk_result,
+    normalize_symptom_result,
+    score_to_risk_level,
+    to_probability,
+    STATUS_COMPLETED,
+    STATUS_COMPLETED_WITH_ERRORS,
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+    STATUS_UNAVAILABLE,
+)
 from utils.helpers import normalize_level
 
 # Initialize the disease plugins
@@ -46,44 +60,37 @@ logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  WORKFLOW STATE
+#
+#  The typed state lives in Agents.contracts so the orchestrator and every
+#  agent share one definition of what flows between them. It is re-exported
+#  here for existing importers.
 # ══════════════════════════════════════════════════════════════════════════════
 
-class HealthWorkflowState(TypedDict):
-    """Typed state that flows through the LangGraph workflow."""
-    health_data: Dict[str, Any]
-    symptoms: List[str]
-    manual_text: Optional[str]
-    include_risk: bool
-    include_symptom: bool
-    include_alert: bool
-    input_type: str                 # "data" | "pdf"
-    pdf_path: Optional[str]
-    use_llm: bool
-    analysis_result: Optional[Dict]
-    risk_result: Optional[Dict]
-    symptom_result: Optional[Dict]
-    final_assessment: Optional[Dict]
-    alert_result: Optional[Dict]
-    workflow_status: str
-    error: Optional[str]
-    steps: Dict[str, Any]
-    timestamp: str
-    input_file: Optional[str]
-    # New fields for multi-disease support
-    disease_results: Dict[str, Dict[str, Any]]
-    agent_status: Dict[str, Dict[str, Any]]
-    history: Optional[List[Dict]]
-    trend_result: Optional[Dict]
-    differential_result: Optional[Dict]
-    explanation: Optional[str]
+__all__ = [
+    "HealthWorkflowState",
+    "MasterHealthAgent",
+    "build_health_workflow",
+    "analyze_health",
+    "_fuse",
+    "_rule_based_risk",
+    "_to_probability",
+    "_score_to_risk_level",
+    "_derive_symptom_metrics",
+]
 
 
-def _agent_status(status: str, error: Optional[str] = None) -> Dict[str, Any]:
-    """Build the common status shape used by graph steps and disease agents."""
-    result: Dict[str, Any] = {"status": status}
-    if error:
-        result["error"] = error
-    return result
+def _merge_agent_status(
+    state: HealthWorkflowState, updates: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Merge node-level agent statuses into the workflow status map.
+
+    LangGraph replaces a state key with whatever a node returns, so the
+    status map has to be merged explicitly — otherwise the status of every
+    agent except the last one to run is silently lost.
+    """
+    merged = dict(state.get("agent_status") or {})
+    merged.update(updates)
+    return merged
 
 
 def _set_disease_status(
@@ -171,6 +178,7 @@ def analyze_report_node(state: HealthWorkflowState) -> dict:
                     raise RuntimeError(
                         analysis.get("error", "unknown analyzer error")
                     )
+                analysis = normalize_analysis_result(analysis, disease=plugin.name)
                 disease_results.setdefault(plugin.name, {})["analysis"] = analysis
                 _set_disease_status(disease_results, plugin.name, "analysis", "completed")
             except Exception as exc:
@@ -224,15 +232,22 @@ def analyze_report_node(state: HealthWorkflowState) -> dict:
         return {
             "analysis_result": primary_analysis,
             "disease_results": disease_results,
-            "agent_status": {
-                name: entry.get("agent_status", {}).get("analysis", _agent_status("failed"))
-                for name, entry in disease_results.items()
-            },
+            "agent_status": _merge_agent_status(
+                state, {"analysis": _agent_status(
+                    "completed_with_errors" if failed_diseases else "completed"
+                )}
+            ),
             "steps": updated_steps
         }
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
-        return {"workflow_status": "failed", "error": str(e)}
+        return {
+            "workflow_status": "failed",
+            "error": str(e),
+            "agent_status": _merge_agent_status(
+                state, {"analysis": _agent_status("failed", str(e))}
+            ),
+        }
 
 
 def predict_risk_node(state: HealthWorkflowState) -> dict:
@@ -272,7 +287,8 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
                         if isinstance(risk, dict)
                         else "Risk predictor returned an invalid result"
                     )
-                risk["risk_level"] = normalize_level(risk.get("risk_level", "Low"))
+                # Every plugin speaks the same risk contract from here on.
+                risk = normalize_risk_result(risk, disease=name)
                 disease_risks[name] = risk
                 disease_results.setdefault(name, {})["risk"] = risk
                 status = "completed_with_errors" if risk.get("fallback_reason") else "completed"
@@ -287,7 +303,10 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
                 "workflow_status": "failed",
                 "error": "No risk predictions generated",
                 "disease_results": disease_results,
-                "agent_status": {"risk": _agent_status("failed", "No risk predictions generated")},
+                "agent_status": _merge_agent_status(
+                    state,
+                    {"risk": _agent_status("failed", "No risk predictions generated")},
+                ),
                 "steps": {
                     **state["steps"],
                     "4_risk_prediction": {
@@ -308,6 +327,7 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
             "status": "completed_with_errors" if failed_diseases else "completed",
             "risk_level": primary_risk.get("risk_level"),
             "risk_probability": primary_risk.get("risk_probability"),
+            "risk_result": primary_risk,
             "disease_risks": disease_risks,
             "failed_diseases": failed_diseases,
         }
@@ -315,15 +335,20 @@ def predict_risk_node(state: HealthWorkflowState) -> dict:
         return {
             "risk_result": primary_risk,
             "disease_results": disease_results,
-            "agent_status": {"risk": _agent_status(
-                "completed_with_errors" if failed_diseases else "completed"
-            )},
+            "agent_status": _merge_agent_status(
+                state, {"risk": _agent_status(
+                    "completed_with_errors" if failed_diseases else "completed"
+                )}
+            ),
             "steps": updated_steps
         }
     except Exception as e:
         logger.error(f"Risk prediction failed: {e}")
         return {
             "risk_result": {"error": str(e)},
+            "agent_status": _merge_agent_status(
+                state, {"risk": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "4_risk_prediction": {"status": "failed", "error": str(e)}},
         }
 
@@ -357,6 +382,9 @@ def generate_alert_node(state: HealthWorkflowState) -> dict:
 
         return {
             "alert_result": alert_result,
+            "agent_status": _merge_agent_status(
+                state, {"alert": _agent_status(STATUS_COMPLETED)}
+            ),
             "steps": {**state["steps"], "7_alert_generation": {
                 "status": "completed",
                 "alert": alert_result.get("alert", False),
@@ -368,6 +396,9 @@ def generate_alert_node(state: HealthWorkflowState) -> dict:
         logger.error(f"Alert generation failed: {e}")
         return {
             "alert_result": {"error": str(e)},
+            "agent_status": _merge_agent_status(
+                state, {"alert": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "7_alert_generation": {
                 "status": "failed", "error": str(e)
             }},
@@ -389,29 +420,39 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
         disease_symptoms = {}
 
         if not symptoms and not manual_text:
-            default_sym = {
-                "symptom_alignment": "low",
-                "severity_score": 0.0,
-                "reasoning": "No symptoms provided; symptom contribution kept minimal.",
-                "input_summary": {
-                    "symptoms_count": 0,
-                    "sources_used": [],
-                    "top_hypothesis": "No symptoms provided",
+            # No symptom information was supplied. The agent is reported as
+            # "skipped" (not "completed") so the fusion step can tell the
+            # difference between "no symptoms" and "symptoms checked".
+            default_sym = normalize_symptom_result(
+                {
+                    "symptom_alignment": "low",
+                    "severity_score": 0.0,
+                    "reasoning": "No symptoms provided; symptom contribution kept minimal.",
+                    "input_summary": {
+                        "symptoms_count": 0,
+                        "sources_used": [],
+                        "top_hypothesis": "No symptoms provided",
+                    },
+                    "model_used": "rule-based",
+                    "symptom_mapping": {
+                        "condition_hypotheses": [],
+                        "top_hypothesis": "No symptoms provided",
+                        "total_symptoms_checked": 0,
+                        "unmatched_symptoms": [],
+                    },
                 },
-                "model_used": "rule-based",
-                "symptom_mapping": {
-                    "condition_hypotheses": [],
-                    "top_hypothesis": "No symptoms provided",
-                    "total_symptoms_checked": 0,
-                    "unmatched_symptoms": [],
-                },
-            }
+                status=STATUS_SKIPPED,
+                reason="No symptoms or manual notes were provided.",
+            )
             for plugin in plugins:
                 disease_symptoms[plugin.name] = default_sym
                 if plugin.name not in disease_results:
                     disease_results[plugin.name] = {}
                 disease_results[plugin.name]["symptom"] = default_sym
-                _set_disease_status(disease_results, plugin.name, "symptom", "completed")
+                _set_disease_status(
+                    disease_results, plugin.name, "symptom", STATUS_SKIPPED,
+                    "No symptoms or manual notes were provided.",
+                )
             primary_name = plugins[0].name if plugins else "diabetes"
             symptom_result = default_sym
         else:
@@ -429,22 +470,27 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
                             use_llm=state.get("use_llm", False),
                         )
                         res.update(_derive_symptom_metrics(res))
+                        res = normalize_symptom_result(res, status=STATUS_COMPLETED)
                         disease_symptoms[name] = res
+                        _set_disease_status(disease_results, name, "symptom", "completed")
                     except Exception as e:
                         logger.error(f"Diabetes symptom check failed: {e}")
-                        disease_symptoms[name] = {
-                            "error": str(e),
-                            "severity_score": 0.0,
-                            "symptom_alignment": "low",
-                        }
+                        disease_symptoms[name] = normalize_symptom_result(
+                            {"error": str(e)},
+                            status=STATUS_FAILED,
+                        )
                         _set_disease_status(disease_results, name, "symptom", "failed", str(e))
                 else:
                     try:
-                        disease_symptoms[name] = plugin.score_symptoms(symptoms)
+                        disease_symptoms[name] = normalize_symptom_result(
+                            plugin.score_symptoms(symptoms), status=STATUS_COMPLETED
+                        )
                         _set_disease_status(disease_results, name, "symptom", "completed")
                     except Exception as exc:
                         logger.error("Symptom scoring failed for %s: %s", name, exc)
-                        disease_symptoms[name] = {"error": str(exc), "severity_score": 0.0}
+                        disease_symptoms[name] = normalize_symptom_result(
+                            {"error": str(exc)}, status=STATUS_FAILED
+                        )
                         _set_disease_status(disease_results, name, "symptom", "failed", str(exc))
 
                 if name not in disease_results:
@@ -460,7 +506,11 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
         return {
             "symptom_result": symptom_result,
             "disease_results": disease_results,
-            "agent_status": {"symptom": _agent_status("completed")},
+            "agent_status": _merge_agent_status(
+                state, {"symptom": _agent_status(
+                    STATUS_COMPLETED if (symptoms or manual_text) else STATUS_SKIPPED
+                )}
+            ),
             "steps": {**state["steps"], "5_symptom_checker": {
                 "status": "completed",
                 "symptom_alignment": symptom_result.get("symptom_alignment"),
@@ -477,7 +527,9 @@ def check_symptoms_node(state: HealthWorkflowState) -> dict:
                 "severity_score": 0.0,
                 "error": str(e),
             },
-            "agent_status": {"symptom": _agent_status("failed", str(e))},
+            "agent_status": _merge_agent_status(
+                state, {"symptom": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "5_symptom_checker": {
                 "status": "failed", "error": str(e)
             }},
@@ -499,7 +551,10 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
         for plugin in plugins:
             name = plugin.name
             entry = disease_results.get(name, {})
-            plugin_trend = entry.get("trend") or state.get("trend_result")
+            # Each disease is fused with its own trend. Falling back to the
+            # workflow-wide trend would leak one disease's trajectory into
+            # another disease's assessment.
+            plugin_trend = entry.get("trend")
             fusion = _fuse(
                 analysis=entry.get("analysis", {}),
                 risk=entry.get("risk", {}),
@@ -508,6 +563,7 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
             )
             if fusion.get("score") is not None:
                 fusion["risk_level"] = normalize_level(fusion.get("risk_level", "Low"))
+                fusion["disease"] = name
             all_fusions[name] = fusion
             disease_results.setdefault(name, {})["final_assessment"] = fusion
 
@@ -516,7 +572,21 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
             if fusion.get("score") is not None
         }
         if not valid_fusions:
-            return {"workflow_status": "failed", "error": "No disease results to merge"}
+            return {
+                "workflow_status": "failed",
+                "error": "No disease results to merge",
+                "disease_results": disease_results,
+                "agent_status": _merge_agent_status(
+                    state, {"fusion": _agent_status("failed", "No disease results to merge")}
+                ),
+                "steps": {**state["steps"], "6_result_fusion": {
+                    "status": "failed", "error": "No disease results to merge"
+                }},
+            }
+
+        unavailable_diseases = [
+            name for name in all_fusions if name not in valid_fusions
+        ]
 
         # Winning disease is the highest scoring disease
         winning_name = max(valid_fusions, key=lambda k: valid_fusions[k]["score"])
@@ -527,7 +597,7 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
         updated_steps["6_result_fusion"] = {
             "status": (
                 "completed_with_errors"
-                if len(valid_fusions) != len(all_fusions)
+                if unavailable_diseases
                 else "completed"
             ),
             "risk_level": winning_assessment["risk_level"],
@@ -535,9 +605,7 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
             "winning_disease": winning_name,
             "final_assessment": winning_assessment,
             "all_diseases": all_fusions,
-            "unavailable_diseases": [
-                name for name in all_fusions if name not in valid_fusions
-            ],
+            "unavailable_diseases": unavailable_diseases,
         }
 
         # Rebuild analysis_result, risk_result, symptom_result from the winning disease
@@ -549,19 +617,27 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
                 **winning_assessment,
                 "disease": winning_name,
                 "all_diseases": all_fusions,
+                "unavailable_diseases": unavailable_diseases,
+                "agent_status": {
+                    name: entry.get("agent_status", {})
+                    for name, entry in disease_results.items()
+                },
             },
             "disease_results": disease_results,
-            "agent_status": {"fusion": _agent_status(
-                "completed_with_errors"
-                if len(valid_fusions) != len(all_fusions)
-                else "completed"
-            )},
+            "agent_status": _merge_agent_status(
+                state, {"fusion": _agent_status(
+                    "completed_with_errors" if unavailable_diseases else "completed"
+                )}
+            ),
             "steps": updated_steps
         }
     except Exception as e:
         logger.error(f"Result fusion failed: {e}")
         return {
             "final_assessment": {"error": str(e)},
+            "agent_status": _merge_agent_status(
+                state, {"fusion": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "6_result_fusion": {
                 "status": "failed", "error": str(e)
             }},
@@ -571,16 +647,23 @@ def merge_results_node(state: HealthWorkflowState) -> dict:
 def finalize_node(state: HealthWorkflowState) -> dict:
     """Mark the workflow as completed (or completed_with_errors if errors occurred)."""
     if state.get("workflow_status") == "failed":
-        return {}
+        # A failed run still has to update the state, otherwise the graph
+        # rejects the node and the caller sees an exception instead of the
+        # failure it was told about.
+        return {
+            "workflow_status": "failed",
+            "error": state.get("error") or "Workflow failed",
+        }
     steps = state.get("steps") or {}
     has_errors = any(
-        isinstance(s, dict) and s.get("status") == "failed" for s in steps.values()
+        isinstance(s, dict)
+        and s.get("status") in ("failed", "completed_with_errors")
+        for s in steps.values()
     ) or (state.get("final_assessment") or {}).get("error") is not None
 
     if has_errors:
         return {"workflow_status": "completed_with_errors"}
     return {"workflow_status": "completed"}
-    return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -602,59 +685,15 @@ def _llm_risk_prediction(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
 def _rule_based_risk(analysis: Dict, health_data: Dict) -> Dict[str, Any]:
     """Deterministic rule-based risk scoring (always available).
 
-    Delegates to the shared compute_diabetes_rule_risk function so
-    _rule_based_risk, _compute_lab_risk, and DiabetesPlugin.rule_risk()
-    all execute the single unified clinical rule scorer.
+    Delegates to the diabetes plugin so the master agent, the rule scorer and
+    ``DiabetesPlugin.rule_risk()`` all execute the single unified clinical
+    rule scorer and emit the same risk contract.
     """
-    from Agents.riskpredictor import compute_diabetes_rule_risk
-    res = compute_diabetes_rule_risk(health_data, analysis)
-
-    raw_level = res.get("risk_level") or "Low"
-    risk_level = normalize_level(raw_level)
-    risk_score = res.get("risk_score") or 0
-    risk_probability = res.get("risk_probability")
-    if risk_probability is None:
-        risk_probability = round(risk_score / 100.0, 2)
-
-    risk_factors = []
-    recommendations = []
-    hba1c = health_data.get("hba1c", 0)
-    glucose = health_data.get("glucose", 0)
-    bmi = health_data.get("bmi", 0)
-    age = health_data.get("age", 0)
-
-    if hba1c >= 6.5:
-        risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "High"})
-        recommendations.append("Consult endocrinologist for diabetes management")
-    elif hba1c >= 5.7:
-        risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "Medium"})
-        recommendations.append("Monitor HbA1c every 3 months")
-
-    if glucose >= 126:
-        risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "High"})
-        recommendations.append("Regular fasting glucose monitoring recommended")
-    elif glucose >= 100:
-        risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "Medium"})
-
-    if bmi >= 25:
-        risk_factors.append({"parameter": "bmi", "value": bmi, "impact": "High" if bmi >= 30 else "Medium"})
-        recommendations.append("Weight management program recommended")
-
-    if age >= 45:
-        risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
-
-    if not recommendations:
-        recommendations.append("Maintain healthy lifestyle and regular checkups")
-
-    return {
-        "risk_level": risk_level,
-        "risk_probability": risk_probability,
-        "risk_percentage": f"{risk_score}%",
-        "prediction_method": "rule_based",
-        "risk_score": risk_score,
-        "risk_factors": risk_factors,
-        "recommendations": recommendations,
-    }
+    plugin = DiabetesPlugin()
+    risk = plugin.rule_risk(health_data, analysis)
+    risk.setdefault("risk_factors", [])
+    risk.setdefault("recommendations", [])
+    return risk
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -674,7 +713,13 @@ def trend_analysis_node(state: HealthWorkflowState) -> dict:
 
         if not plugins:
             res = {"status": "no_plugins", "trend_score": 0.0, "direction": "stable", "visits_used": 0}
-            return {"trend_result": res, "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": res}}}
+            return {
+                "trend_result": res,
+                "agent_status": _merge_agent_status(
+                    state, {"trend": _agent_status(STATUS_SKIPPED, "No applicable plugins")}
+                ),
+                "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": res}}
+            }
 
         trends_per_plugin = {}
         for plugin in plugins:
@@ -687,24 +732,36 @@ def trend_analysis_node(state: HealthWorkflowState) -> dict:
             if plugin.name not in disease_results:
                 disease_results[plugin.name] = {}
             disease_results[plugin.name]["trend"] = t_res
+            _set_disease_status(
+                disease_results,
+                plugin.name,
+                "trend",
+                STATUS_COMPLETED if t_res.get("status") == STATUS_COMPLETED
+                else STATUS_SKIPPED,
+                t_res.get("error") or t_res.get("reason"),
+            )
 
         primary_name = plugins[0].name
         primary_trend = trends_per_plugin.get(primary_name) or {
             "trend_score": 0.0, "direction": "stable", "visits_used": 0, "status": "insufficient_history"
         }
 
+        trend_failed = any(
+            result.get("status") == "failed" for result in trends_per_plugin.values()
+        )
+
         return {
             "trend_result": primary_trend,
             "disease_results": disease_results,
-            "agent_status": {"trend": _agent_status(
-                "completed_with_errors"
-                if any(result.get("status") == "failed" for result in trends_per_plugin.values())
-                else "completed"
-            )},
+            "agent_status": _merge_agent_status(
+                state, {"trend": _agent_status(
+                    "completed_with_errors" if trend_failed else "completed"
+                )}
+            ),
             "steps": {**state["steps"], "5b_trend_analysis": {
                 "status": (
                     "completed_with_errors"
-                    if any(result.get("status") == "failed" for result in trends_per_plugin.values())
+                    if trend_failed
                     else "completed"
                 ),
                 "result": primary_trend,
@@ -716,6 +773,9 @@ def trend_analysis_node(state: HealthWorkflowState) -> dict:
         fallback_trend = {"trend_score": 0.0, "direction": "stable", "visits_used": 0, "status": "failed", "error": str(e)}
         return {
             "trend_result": fallback_trend,
+            "agent_status": _merge_agent_status(
+                state, {"trend": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "5b_trend_analysis": {"status": "completed", "result": fallback_trend, "warning": str(e)}}
         }
 
@@ -731,9 +791,11 @@ def differential_analysis_node(state: HealthWorkflowState) -> dict:
 
         return {
             "differential_result": result,
-            "agent_status": {"differential": _agent_status(
-                "completed" if result is not None else "skipped"
-            )},
+            "agent_status": _merge_agent_status(
+                state, {"differential": _agent_status(
+                    "completed" if result is not None else "skipped"
+                )}
+            ),
             "steps": {**state["steps"], "5c_differential_analysis": {
                 "status": "completed" if result is not None else "skipped",
                 "result": result
@@ -743,7 +805,9 @@ def differential_analysis_node(state: HealthWorkflowState) -> dict:
         logger.warning(f"Differential analysis failed gracefully: {e}")
         return {
             "differential_result": None,
-            "agent_status": {"differential": _agent_status("failed", str(e))},
+            "agent_status": _merge_agent_status(
+                state, {"differential": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "5c_differential_analysis": {
                 "status": "failed",
                 "result": None,
@@ -762,14 +826,22 @@ def explanation_node(state: HealthWorkflowState) -> dict:
         if not final_assessment:
             return {
                 "explanation": "No assessment available to explain.",
+                "agent_status": _merge_agent_status(
+                    state, {"explanation": _agent_status(STATUS_SKIPPED, "No assessment available")}
+                ),
                 "steps": {**state["steps"], "6b_explanation_generation": {"status": "completed", "explanation": "No assessment available."}}
             }
 
         triggers = final_assessment.get("triggers") or []
         explanation = Explainer.explain(final_assessment, trend, triggers)
 
+        # The explanation is part of the assessment, not a side channel.
         return {
             "explanation": explanation,
+            "final_assessment": {**final_assessment, "explanation": explanation},
+            "agent_status": _merge_agent_status(
+                state, {"explanation": _agent_status(STATUS_COMPLETED)}
+            ),
             "steps": {**state["steps"], "6b_explanation_generation": {
                 "status": "completed",
                 "explanation": explanation
@@ -779,6 +851,9 @@ def explanation_node(state: HealthWorkflowState) -> dict:
         logger.warning(f"Explanation generation failed gracefully: {e}")
         return {
             "explanation": "Clinical risk assessment completed.",
+            "agent_status": _merge_agent_status(
+                state, {"explanation": _agent_status("failed", str(e))}
+            ),
             "steps": {**state["steps"], "6b_explanation_generation": {
                 "status": "completed",
                 "warning": str(e)
@@ -856,41 +931,17 @@ def _route_after_explain(state: HealthWorkflowState) -> str:
 
 
 def _to_probability(value: Any) -> Optional[float]:
-    """Parse probability values from 0.82 / "82%" / 82 formats into [0,1]."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        if text.endswith("%"):
-            try:
-                return float(text[:-1].strip()) / 100.0
-            except ValueError:
-                return None
-        try:
-            num = float(text)
-        except ValueError:
-            return None
-    else:
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
-            return None
+    """Parse probability values from 0.82 / "82%" / 82 formats into [0,1].
 
-    if num > 1:
-        return max(0.0, min(1.0, num / 100.0))
-    return max(0.0, min(1.0, num))
+    Kept as a module-level name for existing importers; the implementation
+    lives in the shared contract module.
+    """
+    return to_probability(value)
 
 
 def _score_to_risk_level(score: float) -> str:
     """Map numeric score to standardized risk level."""
-    if score >= 0.80:
-        return "Critical"
-    elif score >= 0.65:
-        return "High"
-    elif score >= 0.40:
-        return "Moderate"
-    else:
-        return "Low"
+    return score_to_risk_level(score)
 
 
 def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = None) -> Dict:
@@ -898,98 +949,7 @@ def _fuse(analysis: Dict, risk: Dict, symptom: Dict, trend: Optional[Dict] = Non
     Combine ML, abnormal labs, symptom severity, and trend trajectory into a final score.
     Implements the Major Project Extension formula.
     """
-    component_status = {
-        "analysis": "completed" if analysis and not analysis.get("error") else "unavailable",
-        "risk": "completed" if risk and not risk.get("error") else "unavailable",
-        "symptom": "completed" if symptom and not symptom.get("error") else "unavailable",
-        "trend": "completed" if trend and trend.get("status") == "completed" else "unavailable",
-    }
-    if component_status["analysis"] == "unavailable" or component_status["risk"] == "unavailable":
-        return {
-            "status": "unavailable",
-            "risk_level": "Unavailable",
-            "score": None,
-            "component_status": component_status,
-            "reason": "Required analysis or risk result is unavailable.",
-        }
-
-    abnormal_count = int(analysis.get("abnormal_count", 0) or 0)
-    abnormal_weight = min(max(abnormal_count, 0) / 3.0, 1.0)
-
-    ml_probability = _to_probability(
-        risk.get("risk_probability")
-        or risk.get("risk_percentage")
-        or ((risk.get("score") / 100.0) if risk.get("score") is not None else None)
-    )
-    if ml_probability is None:
-        ml_probability = 0.0
-
-    symptom_score = symptom.get("severity_score")
-    if symptom_score is None:
-        symptom_score = symptom.get("severity", 0.0)
-    try:
-        symptom_score = float(symptom_score)
-    except (TypeError, ValueError):
-        symptom_score = 0.0
-    symptom_score = max(0.0, min(1.0, symptom_score))
-
-    # Trend Component
-    trend_score = 0.0
-    if component_status["trend"] == "completed":
-        trend_score = trend.get("trend_score", 0.0)
-
-    # Determine which formula to use based on history (at least 2 visits total: 1 past + 1 current)
-    has_history = (trend and trend.get("visits_used", 0) >= 2)
-
-    if has_history:
-        # Major Project Formula: 0.50*risk + 0.25*abnormal + 0.10*symptom + 0.15*trend
-        weights = {"ml": 0.50, "abnormal": 0.25, "symptom": 0.10, "trend": 0.15}
-        formula = "0.50*risk + 0.25*abnormal + 0.10*symptom + 0.15*trend"
-    else:
-        # Fallback Formula: 0.60*risk + 0.30*abnormal + 0.10*symptom
-        weights = {"ml": 0.60, "abnormal": 0.30, "symptom": 0.10, "trend": 0.0}
-        formula = "0.60*risk + 0.30*abnormal + 0.10*symptom"
-
-    components = {
-        "ml": ml_probability,
-        "abnormal": abnormal_weight,
-        "symptom": symptom_score,
-        "trend": trend_score,
-    }
-    available_weights = {
-        name: weight for name, weight in weights.items()
-        if name == "ml" or name == "abnormal"
-        or (name == "symptom" and component_status["symptom"] == "completed")
-        or (name == "trend" and component_status["trend"] == "completed")
-    }
-    weight_total = sum(available_weights.values()) or 1.0
-    final_score = round(
-        sum(components[name] * weight for name, weight in available_weights.items())
-        / weight_total,
-        4,
-    )
-
-    final_risk = normalize_level(_score_to_risk_level(final_score))
-
-    return {
-        "risk_level": final_risk,
-        "status": "completed" if len(available_weights) == len(weights) else "partial",
-        "score": final_score,
-        "ml_probability": ml_probability,
-        "abnormal_count": abnormal_count,
-        "abnormal_count_weight": round(abnormal_weight, 4),
-        "symptom_score": round(symptom_score, 4),
-        "trend_score": round(trend_score, 4),
-        "formula": formula,
-        "component_status": component_status,
-        "components": {
-            "ml_component": round(ml_probability * weights["ml"], 4),
-            "abnormal_component": round(abnormal_weight * weights["abnormal"], 4),
-            "symptom_component": round(symptom_score * weights["symptom"], 4),
-            "trend_component": round(trend_score * weights["trend"], 4),
-        },
-    }
-
+    return fuse_results(analysis, risk, symptom, trend)
 
 
 def _derive_symptom_metrics(symptom_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1170,9 +1130,12 @@ class MasterHealthAgent:
                 "report": result["alert_result"].get("report"),
             } if result.get("alert_result") else {}),
             **({"disease_results": result.get("disease_results")} if result.get("disease_results") else {}),
-            **({"trend_result": result.get("trend_result")} if result.get("trend_result") else {}),
-            **({"differential_result": result.get("differential_result")} if result.get("differential_result") else {}),
+            # Always present, even when the agent was skipped, so a skipped
+            # agent is explicit rather than missing.
+            "trend_result": result.get("trend_result"),
+            "differential_result": result.get("differential_result"),
             **({"explanation": result.get("explanation")} if result.get("explanation") else {}),
+            **({"agent_status": result.get("agent_status")} if result.get("agent_status") else {}),
             **({"error": result["error"]} if result.get("error") else {}),
         }
 
@@ -1239,9 +1202,12 @@ class MasterHealthAgent:
                 "report": result["alert_result"].get("report"),
             } if result.get("alert_result") else {}),
             **({"disease_results": result.get("disease_results")} if result.get("disease_results") else {}),
-            **({"trend_result": result.get("trend_result")} if result.get("trend_result") else {}),
-            **({"differential_result": result.get("differential_result")} if result.get("differential_result") else {}),
+            # Always present, even when the agent was skipped, so a skipped
+            # agent is explicit rather than missing.
+            "trend_result": result.get("trend_result"),
+            "differential_result": result.get("differential_result"),
             **({"explanation": result.get("explanation")} if result.get("explanation") else {}),
+            **({"agent_status": result.get("agent_status")} if result.get("agent_status") else {}),
             **({"error": result["error"]} if result.get("error") else {}),
         }
 

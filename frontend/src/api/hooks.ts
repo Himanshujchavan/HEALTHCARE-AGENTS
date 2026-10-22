@@ -6,7 +6,11 @@ import {
   HealthRecordAnalysisResponse,
   HealthDataSubmitResponse,
   LatestRecordResponse,
-  UploadReportResponse,
+  AssessmentHistoryResponse,
+  AssessmentHistorySummary,
+  ExtractionPreview,
+  ExtractionConfirmRequest,
+  InputSchema,
 } from "../models/health";
 import * as authApi from "./auth";
 import * as healthApi from "./health";
@@ -17,6 +21,11 @@ export const queryKeys = {
     ["health", "records", skip, limit] as const,
   record: (recordId: number) => ["health", "record", recordId] as const,
   analysis: (recordId: number) => ["health", "analysis", recordId] as const,
+  history: (skip: number, limit: number, includePending: boolean) =>
+    ["health", "history", skip, limit, includePending] as const,
+  historySummary: (limit: number) =>
+    ["health", "history", "summary", limit] as const,
+  inputSchema: ["health", "input-schema"] as const,
 };
 
 export const useRegister = () =>
@@ -25,7 +34,12 @@ export const useRegister = () =>
 export const useLogin = () =>
   useMutation({ mutationFn: (payload: UserLogin) => authApi.loginUser(payload) });
 
-export const useLogout = () => useMutation({ mutationFn: authApi.logoutUser });
+export const useLogout = () =>
+  useMutation({
+    mutationFn: async () => {
+      await authApi.logoutUser();
+    },
+  });
 
 export const useLatestRecord = () =>
   useQuery<LatestRecordResponse>({
@@ -64,34 +78,14 @@ export const useSubmitHealthData = () => {
   });
 };
 
-export const useUploadReport = () => {
-  const client = useQueryClient();
-  return useMutation<
-    UploadReportResponse,
-    Error,
-    {
-      file: File;
-      useLLM?: boolean;
-      symptoms?: string[];
-      manualText?: string;
-      disease?: "diabetes" | "cardiovascular";
-    }
-  >({
-    mutationFn: ({ file, useLLM, symptoms, manualText }) =>
-      healthApi.uploadHealthReport(file, useLLM, symptoms, manualText ?? "", disease),
-    onSuccess: () => {
-      client.invalidateQueries({ queryKey: queryKeys.latest });
-      client.invalidateQueries({ queryKey: ["health", "records"] });
-    },
-  });
-};
-
 export const useReanalyzeRecord = () => {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (recordId: number) => healthApi.reanalyzeRecord(recordId),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ["health", "records"] });
+      // The history and its summary both change when a record is re-analysed.
+      client.invalidateQueries({ queryKey: ["health", "history"] });
     },
   });
 };
@@ -103,6 +97,51 @@ export const useDeleteHealthRecord = () => {
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ["health", "records"] });
       client.invalidateQueries({ queryKey: queryKeys.latest });
+    },
+  });
+};
+
+export const useAssessmentHistory = (
+  skip = 0,
+  limit = 50,
+  includePending = false,
+) =>
+  useQuery<AssessmentHistoryResponse>({
+    queryKey: queryKeys.history(skip, limit, includePending),
+    queryFn: () => healthApi.getAssessmentHistory(skip, limit, includePending),
+  });
+
+export const useAssessmentHistorySummary = (limit = 100) =>
+  useQuery<AssessmentHistorySummary>({
+    queryKey: queryKeys.historySummary(limit),
+    queryFn: () => healthApi.getAssessmentHistorySummary(limit),
+  });
+
+export const useInputSchema = () =>
+  useQuery<InputSchema>({
+    queryKey: queryKeys.inputSchema,
+    queryFn: () => healthApi.getInputSchema(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+export const usePreviewReport = () => {
+  const client = useQueryClient();
+  return useMutation<ExtractionPreview, Error, { file: File; useLLM?: boolean }>({
+    mutationFn: ({ file, useLLM }) => healthApi.previewHealthReport(file, useLLM),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["health", "history"] });
+    },
+  });
+};
+
+export const useConfirmExtraction = () => {
+  const client = useQueryClient();
+  return useMutation<HealthDataSubmitResponse, Error, ExtractionConfirmRequest>({
+    mutationFn: (payload) => healthApi.confirmExtraction(payload),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.latest });
+      client.invalidateQueries({ queryKey: ["health", "records"] });
+      client.invalidateQueries({ queryKey: ["health", "history"] });
     },
   });
 };

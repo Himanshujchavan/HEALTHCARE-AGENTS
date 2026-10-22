@@ -29,6 +29,7 @@ class HealthRecord(Base):
     hba1c = Column(Float, nullable=True)
     glucose = Column(Float, nullable=True)
     bmi = Column(Float, nullable=True)
+    homa_ir = Column(Float, nullable=True)
     age = Column(Integer, nullable=True)
 
     # Cardiovascular parameters (optional)
@@ -39,6 +40,11 @@ class HealthRecord(Base):
     hdl = Column(Float, nullable=True)
     smoker = Column(Boolean, nullable=True)
 
+    # Ordinal category codes from the cardiovascular dataset. Optional: the
+    # cardiovascular model uses them only when both are present.
+    chest_pain_type = Column(Integer, nullable=True)
+    st_slope = Column(Integer, nullable=True)
+
     # Added for Phase 0: ensure re-analysis consistency
     symptoms = Column(String, nullable=True)  # Store as JSON string
     manual_text = Column(String, nullable=True)
@@ -47,6 +53,20 @@ class HealthRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     analyzed = Column(Boolean, default=False)
     analysis_result = Column(String, nullable=True)  # Store JSON analysis result
+
+    # Where the record came from: "manual" (typed by the user) or "report"
+    # (uploaded PDF). A report upload starts as "report" and stays pending
+    # until the user confirms the extracted values.
+    source = Column(String, default="manual", nullable=False)
+
+    # Parameters extracted from an uploaded report, as JSON. Kept separate
+    # from the analysis result so the raw extraction stays auditable even
+    # after the values are corrected.
+    extracted_parameters = Column(String, nullable=True)  # Store as JSON string
+
+    # Normalized assessment snapshot, as JSON: the stable view of the
+    # assessment used by the history endpoints.
+    assessment = Column(String, nullable=True)  # Store as JSON string
 
     # Relationship to user
     user = relationship("User", back_populates="health_records")

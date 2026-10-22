@@ -13,6 +13,7 @@ from utils.constants import LOG_FORMAT, LOG_LEVEL
 # Routes
 from app.authroutes import router as auth_router
 from app.healthroutes import router as health_router
+from app.errors import install_error_handlers
 
 # Load environment variables
 load_dotenv()
@@ -50,18 +51,7 @@ app.add_middleware(
 
 
 # Exception handlers
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Global exception handler"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "status": "error",
-            "message": "Internal server error",
-            "detail": str(exc)
-        }
-    )
+install_error_handlers(app)
 
 
 # Startup event

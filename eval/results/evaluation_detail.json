@@ -1,0 +1,167 @@
+{
+  "data_source": "data\\Cardiovascular_Disease_Dataset.csv",
+  "held_out_base": {
+    "accuracy": 0.77,
+    "precision": 0.7917,
+    "recall": 0.819,
+    "f1": 0.8051,
+    "roc_auc": 0.8251,
+    "average_precision": 0.8391,
+    "brier": 0.1664,
+    "confusion_matrix": {
+      "true_negative": 59,
+      "false_positive": 25,
+      "false_negative": 21,
+      "true_positive": 95
+    }
+  },
+  "held_out_extended": {
+    "accuracy": 0.955,
+    "precision": 0.9652,
+    "recall": 0.9569,
+    "f1": 0.961,
+    "roc_auc": 0.9893,
+    "average_precision": 0.9917,
+    "brier": 0.0361,
+    "confusion_matrix": {
+      "true_negative": 80,
+      "false_positive": 4,
+      "false_negative": 5,
+      "true_positive": 111
+    }
+  },
+  "rule_scorer": {
+    "accuracy": 0.64,
+    "precision": 0.6294,
+    "recall": 0.9224,
+    "f1": 0.7483,
+    "roc_auc": 0.7625,
+    "average_precision": 0.8186,
+    "brier": 0.2026,
+    "confusion_matrix": {
+      "true_negative": 21,
+      "false_positive": 63,
+      "false_negative": 9,
+      "true_positive": 107
+    }
+  },
+  "always_positive": {
+    "accuracy": 0.58,
+    "precision": 0.58,
+    "recall": 1.0,
+    "f1": 0.7342,
+    "roc_auc": 0.5,
+    "average_precision": 0.58,
+    "brier": 0.2436,
+    "confusion_matrix": {
+      "true_negative": 0,
+      "false_positive": 84,
+      "false_negative": 0,
+      "true_positive": 116
+    }
+  },
+  "cross_validation": {
+    "roc_auc": 0.8004,
+    "accuracy": 0.763,
+    "brier": 0.1777
+  },
+  "shipped_model_metrics": {
+    "base": {
+      "features": [
+        "age",
+        "systolic_bp",
+        "total_cholesterol"
+      ],
+      "test": {
+        "rows": 200,
+        "accuracy": 0.77,
+        "precision": 0.7917,
+        "recall": 0.819,
+        "f1": 0.8051,
+        "roc_auc": 0.8251,
+        "average_precision": 0.8391,
+        "brier": 0.1664,
+        "confusion_matrix": {
+          "true_negative": 59,
+          "false_positive": 25,
+          "false_negative": 21,
+          "true_positive": 95
+        }
+      },
+      "cross_validation": {
+        "folds": 5,
+        "roc_auc": 0.8004,
+        "accuracy": 0.763,
+        "average_precision": 0.8097,
+        "brier": 0.1777
+      },
+      "baseline": {
+        "prevalence": 0.58,
+        "accuracy_of_always_positive": 0.58
+      },
+      "confidence": "moderate",
+      "confidence_basis": "1000 training rows and a cross-validated ROC-AUC of 0.800: real but modest discrimination. The confidence is capped at 'moderate' because the dataset's labels are rule-derived, so the metrics cannot establish clinical validity."
+    },
+    "extended": {
+      "features": [
+        "age",
+        "systolic_bp",
+        "total_cholesterol",
+        "chest_pain_type",
+        "st_slope"
+      ],
+      "test": {
+        "rows": 200,
+        "accuracy": 0.955,
+        "precision": 0.9652,
+        "recall": 0.9569,
+        "f1": 0.961,
+        "roc_auc": 0.9893,
+        "average_precision": 0.9917,
+        "brier": 0.0361,
+        "confusion_matrix": {
+          "true_negative": 80,
+          "false_positive": 4,
+          "false_negative": 5,
+          "true_positive": 111
+        }
+      },
+      "cross_validation": {
+        "folds": 5,
+        "roc_auc": 0.9842,
+        "accuracy": 0.941,
+        "average_precision": 0.9871,
+        "brier": 0.0461
+      },
+      "baseline": {
+        "prevalence": 0.58,
+        "accuracy_of_always_positive": 0.58
+      },
+      "confidence": "moderate",
+      "confidence_basis": "1000 training rows and a cross-validated ROC-AUC of 0.984. Capped at 'moderate' because the dataset's labels are rule-derived, so the metrics cannot establish clinical validity."
+    }
+  },
+  "base_features": [
+    "age",
+    "systolic_bp",
+    "total_cholesterol"
+  ],
+  "extended_features": [
+    "age",
+    "systolic_bp",
+    "total_cholesterol",
+    "chest_pain_type",
+    "st_slope"
+  ],
+  "model_confidence": "moderate",
+  "confidence_basis": "1000 training rows and a cross-validated ROC-AUC of 0.800: real but modest discrimination. The confidence is capped at 'moderate' because the dataset's labels are rule-derived, so the metrics cannot establish clinical validity.",
+  "limitations": [
+    "The dataset's labels are rule-derived rather than observed clinical outcomes, so held-out metrics measure how well the model recovers the generating rule and do not establish clinical validity.",
+    "The target is cross-sectional: the output is a disease likelihood, not a time-to-event risk estimate, and must not be presented as a 10-year risk.",
+    "Smoking status is absent from the training data, so the model cannot account for it; the rule-based scorer does, and reports an unknown smoking status differently from a confirmed non-smoker.",
+    "The extended model needs both chest pain type and ST slope. A case that supplies only one of them is scored by the weaker base model, so the reported confidence does not depend on how the case was filled in.",
+    "The dataset still has columns the API does not accept (resting ECG, maximum heart rate, exercise angina, ST depression, vessels coloured), which carry part of the label's signal.",
+    "The dataset is small relative to clinical risk models and comes from a single source population, so performance on other populations is unknown.",
+    "The dataset licence could not be independently verified for this copy."
+  ]
+}

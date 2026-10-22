@@ -33,6 +33,9 @@ frontend/dist/
 # Vector DB / embeddings
 data/faiss_index/
 
+# Uploaded reports
+uploads/
+
 # OS
 .DS_Store
 

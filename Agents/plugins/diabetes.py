@@ -1,3 +1,10 @@
+"""Diabetes plugin.
+
+Wraps the existing diabetes logic (report analyzer ranges, rule scorer and
+symptom checker) behind the common ``DiseasePlugin`` interface and emits the
+canonical risk contract shared by every plugin.
+"""
+
 from typing import List, Dict, Any, Optional
 import json
 import logging
@@ -85,13 +92,21 @@ class DiabetesPlugin(DiseasePlugin):
         if prob is None:
             prob = round(score / 100.0, 2)
 
+        risk_factors, recommendations = self.risk_factors(data)
+
         return {
+            "status": "completed",
+            "disease": self.name,
             "score": score,
             "level": norm_level,
             "risk_level": norm_level,
             "risk_probability": prob,
+            "risk_score": score,
             "risk_percentage": f"{int(round(score))}%",
-            "method": "rule-based",
+            "method": "rule_based",
+            "prediction_method": "rule_based",
+            "risk_factors": risk_factors,
+            "recommendations": recommendations,
             "summary": res.get("summary", "")
         }
 
@@ -103,6 +118,13 @@ class DiabetesPlugin(DiseasePlugin):
             risk = json.loads(risk_json)
             if risk.get("success") is not False and not risk.get("error"):
                 risk["risk_level"] = normalize_level(risk.get("risk_level", "Low"))
+                risk["status"] = "completed"
+                risk["disease"] = self.name
+                risk.setdefault("prediction_method", "conversational_agent")
+                risk.setdefault("method", risk["prediction_method"])
+                risk.setdefault("risk_factors", [])
+                risk.setdefault("recommendations", [])
+                risk.setdefault("summary", risk.get("response", ""))
                 return risk
             error = risk.get("error") or "Risk predictor returned an unsuccessful result"
             fallback = self.rule_risk(data, analysis)
@@ -129,3 +151,56 @@ class DiabetesPlugin(DiseasePlugin):
             "severity_score": severity,
             "top_hypothesis": "Diabetes Mellitus" if severity > 0.3 else "Unknown"
         }
+
+    # ── shared risk explanation ───────────────────────────────────────────
+
+    def risk_factors(self, data: Dict[str, Any]) -> tuple:
+        """Derive the clinical risk factors and recommendations for a case.
+
+        This is the single source of the diabetes risk narrative: the plugin,
+        the report renderer and the alert agent all read it from here.
+        """
+        risk_factors = []
+        recommendations = []
+        hba1c = _as_float(data.get("hba1c"))
+        glucose = _as_float(data.get("glucose"))
+        bmi = _as_float(data.get("bmi"))
+        age = _as_float(data.get("age"))
+
+        if hba1c is not None and hba1c >= 6.5:
+            risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "High"})
+            recommendations.append("Consult endocrinologist for diabetes management")
+        elif hba1c is not None and hba1c >= 5.7:
+            risk_factors.append({"parameter": "hba1c", "value": hba1c, "impact": "Medium"})
+            recommendations.append("Monitor HbA1c every 3 months")
+
+        if glucose is not None and glucose >= 126:
+            risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "High"})
+            recommendations.append("Regular fasting glucose monitoring recommended")
+        elif glucose is not None and glucose >= 100:
+            risk_factors.append({"parameter": "glucose", "value": glucose, "impact": "Medium"})
+
+        if bmi is not None and bmi >= 25:
+            risk_factors.append({
+                "parameter": "bmi",
+                "value": bmi,
+                "impact": "High" if bmi >= 30 else "Medium",
+            })
+            recommendations.append("Weight management program recommended")
+
+        if age is not None and age >= 45:
+            risk_factors.append({"parameter": "age", "value": age, "impact": "Medium"})
+
+        if not recommendations:
+            recommendations.append("Maintain healthy lifestyle and regular checkups")
+
+        return risk_factors, recommendations
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

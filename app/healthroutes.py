@@ -1,34 +1,42 @@
 """HEALTH DATA API ROUTES
 
-Handles health data submission, PDF uploads, retrieval,
-and orchestration through the master health workflow.
+Handles health data submission, PDF uploads, extraction previews, retrieval,
+assessment history and orchestration through the master health workflow.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
 import logging
 import json
+import os
 
 # Imports
 from database.config import get_db
 from database.models import User, HealthRecord
-from database.crud import (
-    create_health_record,
-    get_health_record,
-    get_user_health_records,
-    get_latest_health_record,
-    update_health_record_analysis,
-    delete_health_record,
-    get_history
-)
+from database import crud
 from schemas.health_schema import (
+    AssessmentHistoryResponse,
+    AssessmentHistorySummary,
+    ErrorResponse,
+    ExtractionConfirmRequest,
+    ExtractionPreviewResponse,
+    HealthDataSubmitResponse,
     HealthInput,
     HealthRecordResponse,
-    HealthDataSubmitResponse
+    InputSchemaResponse,
+    PARAMETER_RANGES,
+    UnifiedAssessmentResponse,
 )
 from app.auth import get_current_user
+from app.serializers import (
+    assessment_series,
+    normalize_assessment,
+    parse_analysis_result,
+    parse_extracted_parameters,
+    record_assessment_item,
+)
 from Agents.reportanalyzer import ReportAnalyzerAgent
 from Agents.masterhealth import MasterHealthAgent
 from Agents.alertsystem import AlertAgent
@@ -47,6 +55,13 @@ router = APIRouter(
 analyzer_agent = ReportAnalyzerAgent()
 master_agent = MasterHealthAgent()
 
+#: Maximum accepted report size, in bytes.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
 
 def _build_analysis_summary(analysis: Dict[str, Any]) -> str:
     """Create a route-level summary for either legacy or master workflow output."""
@@ -65,6 +80,328 @@ def _build_analysis_summary(analysis: Dict[str, Any]) -> str:
 
     return analyzer_agent.get_summary(analysis)
 
+
+def _unified_response(
+    workflow_result: Optional[Dict[str, Any]],
+    record_id: Optional[int] = None,
+    created_at: Optional[str] = None,
+) -> UnifiedAssessmentResponse:
+    """Build the normalized unified response for a workflow result."""
+    payload = build_unified_response(workflow_result or {}, record_id, created_at)
+    return UnifiedAssessmentResponse.model_validate(payload)
+
+
+def _health_data_from_input(data: HealthInput) -> Dict[str, Any]:
+    """The clinical parameters of a submission, without the context fields."""
+    return data.model_dump(
+        exclude_none=True,
+        exclude={"symptoms", "manual_text", "use_llm"},
+    )
+
+
+def _store_assessment(
+    db: Session,
+    record: HealthRecord,
+    workflow_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist the workflow result and its normalized snapshot."""
+    snapshot = normalize_assessment(workflow_result)
+    crud.update_health_record_analysis(
+        db, record.id, json.dumps(workflow_result), assessment=snapshot
+    )
+    return snapshot
+
+
+def _submit_response(
+    record: HealthRecord,
+    workflow_result: Dict[str, Any],
+    snapshot: Dict[str, Any],
+    unified: UnifiedAssessmentResponse,
+) -> HealthDataSubmitResponse:
+    """Assemble the normalized submission response."""
+    return HealthDataSubmitResponse(
+        status="success",
+        message="Health data stored and processed through the master health workflow",
+        record_id=record.id,
+        timestamp=datetime.utcnow(),
+        workflow_status=workflow_result.get("workflow_status"),
+        risk_level=workflow_result.get("risk_level"),
+        alert=workflow_result.get("alert"),
+        report=workflow_result.get("report"),
+        final_assessment=workflow_result.get("final_assessment"),
+        disease=workflow_result.get("disease_results"),
+        explanation=workflow_result.get("explanation"),
+        trend=workflow_result.get("trend_result"),
+        differential=workflow_result.get("differential_result"),
+        trend_result=workflow_result.get("trend_result"),
+        differential_result=workflow_result.get("differential_result"),
+        disease_results=workflow_result.get("disease_results"),
+        agent_status=workflow_result.get("agent_status"),
+        assessment=snapshot,
+        unified=unified,
+    )
+
+
+async def _store_upload(file: UploadFile, user: User) -> Path:
+    """Validate and persist an uploaded report, returning its path."""
+    if file.content_type not in {"application/pdf", "application/octet-stream"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files are supported",
+        )
+
+    uploads_dir = Path(os.getenv("UPLOAD_DIR", "uploads"))
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = Path(file.filename).name or "report.pdf"
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    stored_path = uploads_dir / f"{user.id}_{timestamp}_{safe_name}"
+
+    written = 0
+    with stored_path.open("wb") as out_file:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                out_file.close()
+                stored_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Report exceeds the 10 MB limit",
+                )
+            out_file.write(chunk)
+
+    logger.info("PDF report uploaded by user %s: %s", user.id, stored_path)
+    return stored_path
+
+
+def _extract_values(pdf_path: Path, use_llm: bool) -> Dict[str, Any]:
+    """Read the raw clinical values out of a report."""
+    from tools.labparse import extract_health_data_from_pdf
+
+    extracted = extract_health_data_from_pdf(str(pdf_path), use_llm=use_llm)
+    return {k: v for k, v in (extracted or {}).items() if v is not None}
+
+
+def _describe_parameters(
+    values: Dict[str, Any], source: str = "extracted"
+) -> Dict[str, Dict[str, Any]]:
+    """Describe captured values with their clinical status, unit and note.
+
+    Every disease plugin evaluates the values it knows about, so a parameter
+    is reported in the context of each condition it applies to. ``source``
+    records where the value came from: ``extracted`` for a report, or
+    ``submitted`` for values typed by the user.
+    """
+    from Agents.plugins import registry
+    from Agents.reportanalyzer import validate_parameters
+
+    described: Dict[str, Dict[str, Any]] = {}
+    for name in registry.list_all():
+        plugin = registry.get(name)
+        if plugin is None:
+            continue
+        try:
+            analysis = validate_parameters(values, plugin=plugin)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Could not describe parameters for %s: %s", name, exc)
+            continue
+        for param, entry in (analysis.get("parameters") or {}).items():
+            if param not in described or described[param].get("status") == "Unknown":
+                described[param] = {**dict(entry), "source": source}
+
+    # Values no plugin covers are still reported, without a clinical status.
+    for param, value in values.items():
+        if param not in described:
+            described[param] = {
+                "value": value,
+                "status": "Reported",
+                "unit": "",
+                "note": None,
+                "source": source,
+            }
+    return described
+
+
+def _missing_fields_by_disease(values: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Required-but-absent parameters per disease, for the extraction preview."""
+    from Agents.plugins import registry
+
+    missing: Dict[str, List[str]] = {}
+    for name in registry.list_all():
+        plugin = registry.get(name)
+        if plugin is None:
+            continue
+        gaps = registry.missing_fields(values, plugin)
+        if gaps:
+            missing[name] = gaps
+    return missing
+
+
+def _available_diseases(values: Dict[str, Any]) -> List[str]:
+    """Diseases that can be assessed from the given values."""
+    from Agents.plugins import registry
+
+    return [plugin.name for plugin in registry.applicable(values)]
+
+
+def _symptom_catalogue() -> List[str]:
+    """The symptoms the symptom agent recognizes."""
+    try:
+        from Agents.symptomchecker import SYMPTOM_CATEGORIES
+
+        catalogue: List[str] = []
+        for symptoms in SYMPTOM_CATEGORIES.values():
+            for symptom in symptoms:
+                if symptom not in catalogue:
+                    catalogue.append(symptom)
+        return catalogue
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  INPUT CONTRACT
+# ═════════════════════════════════════════════════════════════════════════════
+
+@router.get("/input-schema", response_model=InputSchemaResponse)
+async def get_input_schema(user: User = Depends(get_current_user)):
+    """Describe the parameters the API accepts.
+
+    The disease requirements are read from the disease plugins, so the client
+    always sees exactly what the agents need.
+    """
+    from Agents.plugins import registry
+
+    diseases: Dict[str, Dict[str, Any]] = {}
+    required_by: Dict[str, List[str]] = {}
+    for name in registry.list_all():
+        plugin = registry.get(name)
+        if plugin is None:
+            continue
+        diseases[name] = {
+            "required": list(plugin.required_fields),
+            "optional": list(getattr(plugin, "optional_fields", [])),
+            "reference_ranges": plugin.reference_ranges,
+            "alert_thresholds": getattr(plugin, "alert_thresholds", {}),
+        }
+        for field in plugin.required_fields:
+            required_by.setdefault(field, []).append(name)
+
+    parameters: Dict[str, Dict[str, Any]] = {}
+    for name, bounds in PARAMETER_RANGES.items():
+        parameters[name] = {
+            **bounds,
+            "required_for": required_by.get(name, []),
+            "type": bounds.get("type", "number"),
+        }
+    parameters["smoker"] = {
+        "min": None, "max": None, "unit": "", "label": "Smoker",
+        "required_for": required_by.get("smoker", []), "type": "boolean",
+    }
+
+    return InputSchemaResponse(
+        status="success",
+        parameters=parameters,
+        diseases=diseases,
+        symptoms=_symptom_catalogue(),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  SUBMISSION
+# ═════════════════════════════════════════════════════════════════════════════
+
+@router.post(
+    "/health-data",
+    response_model=HealthDataSubmitResponse,
+    responses={422: {"model": ErrorResponse}},
+)
+async def submit_health_data(
+    data: HealthInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    POST /api/v1/health/health-data
+
+    Submit health data for full multi-agent health analysis
+
+    Flow:
+    1. Validate input (Pydantic)
+    2. Authenticate user (JWT)
+    3. Store in database
+    4. Trigger Master Health Agent
+    5. Store workflow result and the normalized assessment snapshot
+    6. Return the final risk, alert and report
+
+    Example Request:
+    {
+        "hba1c": 6.8,
+        "glucose": 148,
+        "bmi": 29,
+        "age": 45,
+        "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"],
+        "manual_text": "Family history of diabetes"
+    }
+    """
+    try:
+        logger.info(f"Health data submission from user {user.id} ({user.username})")
+
+        # Step 1 & 2: Already done by dependencies (Pydantic validation + JWT auth)
+
+        # The clinical parameters that will be analyzed.
+        health_data_dict = _health_data_from_input(data)
+
+        # Step 3: Store in database, with the captured parameters kept
+        # alongside the record so the analysis can always be audited.
+        record = crud.create_health_record(
+            db,
+            user.id,
+            data,
+            source="manual",
+            extracted_parameters=_describe_parameters(health_data_dict, source="submitted"),
+        )
+
+        # Step 4: Trigger Master Health Agent
+
+        # Retrieve recent history for trend analysis (exclude current record)
+        history = crud.get_history(db, user.id, exclude_id=record.id, limit=10)
+
+        workflow_result = master_agent.process_health_data(
+            health_data=health_data_dict,
+            symptoms=data.symptoms or [],
+            manual_text=data.manual_text,
+            use_llm=bool(data.use_llm),
+            history=history,
+        )
+
+        # Step 5: Store workflow result and the normalized assessment
+        snapshot = _store_assessment(db, record, workflow_result)
+        unified = _unified_response(
+            workflow_result, record.id, record.created_at.isoformat()
+        )
+
+        logger.info(f"Health record created successfully: ID={record.id}")
+
+        # Step 6: Return final orchestration result
+        return _submit_response(record, workflow_result, snapshot, unified)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error submitting health data: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process health data: {str(e)}"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  REPORT UPLOAD — ONE SHOT, PREVIEW AND CONFIRM
+# ═════════════════════════════════════════════════════════════════════════════
 
 @router.post("/upload-report")
 async def upload_health_report(
@@ -88,32 +425,14 @@ async def upload_health_report(
        - ReportAnalyzerAgent.analyze_health_record → validated parameters
        - downstream risk, fusion, and alert steps
     4. API returns both extracted parameters and full workflow result.
+
+    Use ``/upload-report/preview`` instead when the user must confirm or
+    correct the extracted values first.
     """
     try:
-        if file.content_type not in {"application/pdf", "application/octet-stream"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only PDF files are supported",
-            )
+        stored_path = await _store_upload(file, user)
 
-        uploads_dir = Path("uploads")
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_name = Path(file.filename).name or "report.pdf"
-        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        stored_path = uploads_dir / f"{user.id}_{timestamp}_{safe_name}"
-
-        # Stream file to disk in chunks
-        with stored_path.open("wb") as out_file:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                out_file.write(chunk)
-
-        logger.info("PDF report uploaded by user %s: %s", user.id, stored_path)
-
-        history = get_history(db, user.id, limit=10)
+        history = crud.get_history(db, user.id, limit=10)
         workflow_result = master_agent.process_pdf_report(
             pdf_path=str(stored_path),
             use_llm=use_llm,
@@ -149,15 +468,35 @@ async def upload_health_report(
             ldl=extracted_data.get("ldl"),
             hdl=extracted_data.get("hdl"),
             smoker=extracted_data.get("smoker"),
+            chest_pain_type=extracted_data.get("chest_pain_type"),
+            st_slope=extracted_data.get("st_slope"),
             symptoms=json.dumps(symptoms) if symptoms else None,
             manual_text=manual_text,
+            source="report",
             analyzed=bool(workflow_result.get("workflow_status") == "completed"),
             analysis_result=json.dumps(workflow_result),
         )
         db.add(record)
         db.commit()
         db.refresh(record)
-        unified = build_unified_response(workflow_result, record.id, record.created_at.isoformat())
+
+        # Keep the raw extraction so the values can be audited even after the
+        # user corrects them.
+        described = _describe_parameters(extracted_data)
+        if described:
+            record.extracted_parameters = json.dumps(described, default=str)
+            db.commit()
+            db.refresh(record)
+
+        snapshot = normalize_assessment(workflow_result)
+        if record.assessment is None:
+            record.assessment = json.dumps(snapshot, default=str)
+            db.commit()
+            db.refresh(record)
+
+        unified = _unified_response(
+            workflow_result, record.id, record.created_at.isoformat()
+        )
 
         return {
             "status": "success",
@@ -168,6 +507,7 @@ async def upload_health_report(
             "analysis": analysis_result,
             "record_id": record.id,
             "disease": disease,
+            "assessment": snapshot,
             "unified": unified,
             **workflow_result,
         }
@@ -182,94 +522,159 @@ async def upload_health_report(
         )
 
 
-@router.post("/health-data", response_model=HealthDataSubmitResponse)
-async def submit_health_data(
-    data: HealthInput,
+@router.post(
+    "/upload-report/preview",
+    response_model=ExtractionPreviewResponse,
+    responses={422: {"model": ErrorResponse}},
+)
+async def preview_health_report(
+    file: UploadFile = File(...),
+    use_llm: bool = False,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    POST /api/v1/health/health-data
-    
-    Submit health data for full multi-agent health analysis
-    
-    Flow:
-    1. Validate input (Pydantic)
-    2. Authenticate user (JWT)
-    3. Store in database
-    4. Trigger Master Health Agent
-    5. Store workflow result
-    6. Return final risk, alert, and report
-    
-    Example Request:
-    {
-        "hba1c": 6.8,
-        "glucose": 148,
-        "bmi": 29,
-        "age": 45,
-        "symptoms": ["Fatigue / Low energy", "Polyuria (frequent urination)"],
-        "manual_text": "Family history of diabetes"
-    }
+    """Upload a report and preview the values extracted from it.
+
+    Endpoint: POST /api/v1/health/upload-report/preview
+
+    No assessment is run. The record is created in a ``pending`` state and
+    the response lists the extracted values, the parameters still missing for
+    each condition, and the conditions that can already be assessed. The
+    client confirms (and may correct) the values with
+    ``/upload-report/confirm``.
     """
     try:
-        logger.info(f"Health data submission from user {user.id} ({user.username})")
-        
-        # Step 1 & 2: Already done by dependencies (Pydantic validation + JWT auth)
-        
-        # Step 3: Store in database
-        record = create_health_record(db, user.id, data)
-        
-        # Step 4: Trigger Master Health Agent
-        # Build health data dict from all provided non-null fields
-        health_data_dict = data.model_dump(
-            exclude_none=True,
-            exclude={"symptoms", "manual_text", "use_llm"},
+        stored_path = await _store_upload(file, user)
+        values = _extract_values(stored_path, use_llm)
+
+        if not values:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No health parameters could be extracted from the report",
+            )
+
+        described = _describe_parameters(values)
+        record = HealthRecord(
+            user_id=user.id,
+            hba1c=values.get("hba1c"),
+            glucose=values.get("glucose"),
+            bmi=values.get("bmi"),
+            age=values.get("age"),
+            systolic_bp=values.get("systolic_bp"),
+            diastolic_bp=values.get("diastolic_bp"),
+            total_cholesterol=values.get("total_cholesterol"),
+            ldl=values.get("ldl"),
+            hdl=values.get("hdl"),
+            smoker=values.get("smoker"),
+            chest_pain_type=values.get("chest_pain_type"),
+            st_slope=values.get("st_slope"),
+            source="report",
+            analyzed=False,
+            extracted_parameters=json.dumps(described, default=str),
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+
+        missing = _missing_fields_by_disease(values)
+        available = _available_diseases(values)
+
+        return ExtractionPreviewResponse(
+            status="pending",
+            message=(
+                "Report parsed. Confirm the values to run the assessment."
+                if available
+                else "Report parsed, but more values are needed before an assessment can run."
+            ),
+            extraction_id=record.id,
+            filename=file.filename or stored_path.name,
+            source="report",
+            extracted_parameters=described,
+            missing_fields=missing,
+            available_diseases=available,
+            created_at=record.created_at,
         )
 
-        # Retrieve recent history for trend analysis (exclude current record)
-        history = get_history(db, user.id, exclude_id=record.id, limit=10)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error previewing uploaded PDF: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to extract values from the PDF report",
+        )
+
+
+@router.post(
+    "/upload-report/confirm",
+    response_model=HealthDataSubmitResponse,
+    responses={422: {"model": ErrorResponse}},
+)
+async def confirm_extraction(
+    payload: ExtractionConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Confirm (and optionally correct) extracted values and assess them.
+
+    Endpoint: POST /api/v1/health/upload-report/confirm
+
+    The confirmed values are validated exactly like a manual submission, then
+    the master workflow runs on them and the result replaces the pending
+    extraction.
+    """
+    try:
+        record = crud.get_health_record(db, payload.extraction_id)
+        if not record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Extraction not found",
+            )
+        if record.user_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied",
+            )
+        if record.source != "report":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This record did not come from a report upload",
+            )
+
+        # Apply the confirmed values, keeping the raw extraction for audit.
+        crud.update_health_record_values(db, record, payload)
+
+        health_data_dict = _health_data_from_input(payload)
+        history = crud.get_history(db, user.id, exclude_id=record.id, limit=10)
 
         workflow_result = master_agent.process_health_data(
             health_data=health_data_dict,
-            manual_text=data.manual_text,
-            use_llm=bool(data.use_llm),
+            symptoms=payload.symptoms or [],
+            manual_text=payload.manual_text,
+            use_llm=bool(payload.use_llm),
             history=history,
         )
 
-        # Step 5: Store workflow result
-        update_health_record_analysis(db, record.id, json.dumps(workflow_result))
-        unified = build_unified_response(
+        snapshot = _store_assessment(db, record, workflow_result)
+        unified = _unified_response(
             workflow_result, record.id, record.created_at.isoformat()
         )
-        
-        logger.info(f"Health record created successfully: ID={record.id}")
-        
-        # Step 6: Return final orchestration result
-        return HealthDataSubmitResponse(
-            status="success",
-            message="Health data stored and processed through the master health workflow",
-            record_id=record.id,
-            timestamp=datetime.utcnow(),
-            workflow_status=workflow_result.get("workflow_status"),
-            risk_level=workflow_result.get("risk_level"),
-            alert=workflow_result.get("alert"),
-            report=workflow_result.get("report"),
-            final_assessment=workflow_result.get("final_assessment"),
-            disease=workflow_result.get("disease_results"),
-            explanation=workflow_result.get("explanation"),
-            trend=workflow_result.get("trend_result"),
-            differential=workflow_result.get("differential_result"),
-            disease_results=workflow_result.get("disease_results"),
-            unified=unified,
-        )
-    
+
+        return _submit_response(record, workflow_result, snapshot, unified)
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error submitting health data: {str(e)}")
+        logger.error("Error confirming extracted values: %s", str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process health data: {str(e)}"
+            detail="Failed to process the confirmed values",
         )
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RETRIEVAL
+# ═════════════════════════════════════════════════════════════════════════════
 
 @router.get("/health-data/{record_id}", response_model=HealthRecordResponse)
 async def get_health_data(
@@ -279,18 +684,18 @@ async def get_health_data(
 ):
     """
     GET /api/v1/health/health-data/{record_id}
-    
+
     Retrieve a specific health record with analysis
     """
     try:
-        record = get_health_record(db, record_id)
-        
+        record = crud.get_health_record(db, record_id)
+
         if not record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Health record not found"
             )
-        
+
         # Security check: ensure user owns the record
         if record.user_id != user.id:
             logger.warning(
@@ -300,9 +705,9 @@ async def get_health_data(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied"
             )
-        
+
         return record
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -322,15 +727,15 @@ async def get_user_health_data(
 ):
     """
     GET /api/v1/health/health-data
-    
+
     Retrieve all health records for current user
     Supports pagination
     """
     try:
-        records = get_user_health_records(db, user.id, skip, limit)
+        records = crud.get_user_health_records(db, user.id, skip, limit)
         logger.info(f"Retrieved {len(records)} health records for user {user.id}")
         return records
-    
+
     except Exception as e:
         logger.error(f"Error retrieving health records: {str(e)}")
         raise HTTPException(
@@ -347,46 +752,53 @@ async def get_health_data_analysis(
 ):
     """
     GET /api/v1/health/health-data/{record_id}/analysis
-    
-    Get detailed analysis for a health record
+
+    Get detailed analysis for a health record, including the normalized
+    assessment and the parameters extracted from an uploaded report.
     """
     try:
-        record = get_health_record(db, record_id)
-        
+        record = crud.get_health_record(db, record_id)
+
         if not record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Health record not found"
             )
-        
+
         # Security check
         if record.user_id != user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied"
             )
-        
+
         if not record.analyzed or not record.analysis_result:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Analysis not available for this record"
             )
-        
+
         # Parse and return analysis
-        analysis = json.loads(record.analysis_result)
-        
+        analysis = parse_analysis_result(record.analysis_result)
+
         # Add summary for legacy or master workflow result
         analysis["summary"] = _build_analysis_summary(analysis)
-        analysis["unified"] = build_unified_response(
+        analysis["unified"] = _unified_response(
             analysis, record.id, record.created_at.isoformat()
         )
-        
+        analysis["assessment"] = normalize_assessment(analysis)
+
+        extracted = parse_extracted_parameters(record.extracted_parameters)
+        if extracted:
+            analysis["extracted_parameters"] = extracted
+
         return {
             "record_id": record_id,
             "created_at": record.created_at,
+            "source": record.source,
             "analysis": analysis
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -405,11 +817,11 @@ async def delete_health_data(
 ):
     """
     DELETE /api/v1/health/health-data/{record_id}
-    
+
     Delete a specific health record for the current user
     """
     try:
-        record = get_health_record(db, record_id)
+        record = crud.get_health_record(db, record_id)
 
         if not record:
             raise HTTPException(
@@ -423,7 +835,7 @@ async def delete_health_data(
                 detail="Access denied"
             )
 
-        deleted = delete_health_record(db, record_id)
+        deleted = crud.delete_health_record(db, record_id)
         if not deleted:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -453,18 +865,18 @@ async def get_latest_record(
 ):
     """
     GET /api/v1/health/latest
-    
+
     Get the most recent health record with analysis
     """
     try:
-        record = get_latest_health_record(db, user.id)
-        
+        record = crud.get_latest_health_record(db, user.id)
+
         if not record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No health records found"
             )
-        
+
         response = {
             "record": {
                 "id": record.id,
@@ -478,21 +890,25 @@ async def get_latest_record(
                 "ldl": record.ldl,
                 "hdl": record.hdl,
                 "smoker": record.smoker,
+                "chest_pain_type": record.chest_pain_type,
+                "st_slope": record.st_slope,
+                "source": record.source,
                 "created_at": record.created_at
             }
         }
-        
+
         # Include analysis if available
         if record.analyzed and record.analysis_result:
-            analysis = json.loads(record.analysis_result)
+            analysis = parse_analysis_result(record.analysis_result)
             response["analysis"] = analysis
-            response["unified"] = build_unified_response(
+            response["unified"] = _unified_response(
                 analysis, record.id, record.created_at.isoformat()
             )
+            response["assessment"] = normalize_assessment(analysis)
             response["summary"] = _build_analysis_summary(analysis)
-        
+
         return response
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -502,6 +918,183 @@ async def get_latest_record(
             detail="Failed to retrieve latest record"
         )
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  ASSESSMENT HISTORY
+# ═════════════════════════════════════════════════════════════════════════════
+
+@router.get("/history", response_model=AssessmentHistoryResponse)
+async def get_assessment_history(
+    skip: int = 0,
+    limit: int = 50,
+    include_pending: bool = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    GET /api/v1/health/history
+
+    The user's assessments, newest first. Every entry is normalized, so a
+    record written by an older build answers the same fields as a new one.
+    """
+    try:
+        records = crud.get_assessment_history(
+            db, user.id, skip=skip, limit=limit, include_pending=include_pending
+        )
+        total = crud.count_assessment_history(
+            db, user.id, include_pending=include_pending
+        )
+        items = [record_assessment_item(record) for record in records]
+
+        return AssessmentHistoryResponse(
+            status="success",
+            count=len(items),
+            total=total,
+            skip=skip,
+            limit=limit,
+            items=items,
+        )
+
+    except Exception as e:
+        logger.error(f"Error retrieving assessment history: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve assessment history",
+        )
+
+
+@router.get("/history/summary", response_model=AssessmentHistorySummary)
+async def get_assessment_history_summary(
+    limit: int = 100,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    GET /api/v1/health/history/summary
+
+    Time series of the user's parameters and assessment scores, for charting.
+    """
+    try:
+        records = crud.get_user_assessment_series(db, user.id, limit=limit)
+        series = assessment_series(records)
+
+        risk_levels: Dict[str, int] = {}
+        for point in series["scores"]:
+            level = point.get("risk_level")
+            if level:
+                risk_levels[level] = risk_levels.get(level, 0) + 1
+
+        return AssessmentHistorySummary(
+            status="success",
+            count=len(records),
+            parameters=series["parameters"],
+            scores=series["scores"],
+            risk_levels=risk_levels,
+        )
+
+    except Exception as e:
+        logger.error(f"Error retrieving assessment history summary: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve assessment history summary",
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RE-ANALYSIS
+# ═════════════════════════════════════════════════════════════════════════════
+
+@router.post("/analyze/{record_id}")
+async def reanalyze_record(
+    record_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    POST /api/v1/health/analyze/{record_id}
+
+    Re-run the full master-agent analysis on an existing health record
+    """
+    try:
+        record = crud.get_health_record(db, record_id)
+
+        if not record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Health record not found"
+            )
+
+        # Security check
+        if record.user_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+
+        # Re-run master workflow
+        health_data_dict = {
+            field: value
+            for field in (
+                "hba1c", "glucose", "bmi", "homa_ir", "age",
+                "systolic_bp", "diastolic_bp", "total_cholesterol",
+                "ldl", "hdl", "smoker",
+                "chest_pain_type", "st_slope",
+            )
+            if (value := getattr(record, field, None)) is not None
+        }
+
+        # Restore symptoms and manual text from DB for consistent re-analysis
+        symptoms = json.loads(record.symptoms) if record.symptoms else []
+        manual_text = record.manual_text
+
+        # Use the same history window as the original submission (the record
+        # itself excluded) so a re-analysis reproduces the original trend.
+        history = crud.get_history(db, user.id, exclude_id=record.id, limit=10)
+
+        workflow_result = master_agent.process_health_data(
+            health_data=health_data_dict,
+            symptoms=symptoms,
+            manual_text=manual_text,
+            history=history,
+        )
+        snapshot = _store_assessment(db, record, workflow_result)
+        unified = _unified_response(
+            workflow_result, record.id, record.created_at.isoformat()
+        )
+
+        logger.info(f"Record {record_id} re-analyzed successfully")
+
+        return {
+            "status": "success",
+            "message": "Record re-analyzed through the master health workflow",
+            "record_id": record_id,
+            "workflow_status": workflow_result.get("workflow_status"),
+            "risk_level": workflow_result.get("risk_level"),
+            "alert": workflow_result.get("alert"),
+            "report": workflow_result.get("report"),
+            "final_assessment": workflow_result.get("final_assessment"),
+            "explanation": workflow_result.get("explanation"),
+            "disease_results": workflow_result.get("disease_results"),
+            "trend_result": workflow_result.get("trend_result"),
+            "differential_result": workflow_result.get("differential_result"),
+            "agent_status": workflow_result.get("agent_status"),
+            "assessment": snapshot,
+            "unified": unified,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error re-analyzing record: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to re-analyze record"
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  AGENT DEBUG ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
 
 @router.post("/agents/report-analyzer")
 async def debug_report_analyzer(
@@ -667,75 +1260,4 @@ async def debug_master_agent(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Master agent debug failed",
-        )
-
-
-@router.post("/analyze/{record_id}")
-async def reanalyze_record(
-    record_id: int,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    POST /api/v1/health/analyze/{record_id}
-    
-    Re-run the full master-agent analysis on an existing health record
-    """
-    try:
-        record = get_health_record(db, record_id)
-        
-        if not record:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Health record not found"
-            )
-        
-        # Security check
-        if record.user_id != user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-        
-        # Re-run master workflow
-        health_data_dict = {
-            field: value
-            for field in (
-                "hba1c", "glucose", "bmi", "age",
-                "systolic_bp", "diastolic_bp", "total_cholesterol",
-                "ldl", "hdl", "smoker",
-            )
-            if (value := getattr(record, field, None)) is not None
-        }
-
-        # Restore symptoms and manual text from DB for consistent re-analysis
-        symptoms = json.loads(record.symptoms) if record.symptoms else []
-        manual_text = record.manual_text
-
-        workflow_result = master_agent.process_health_data(
-            health_data=health_data_dict,
-            symptoms=symptoms,
-            manual_text=manual_text
-        )
-        update_health_record_analysis(db, record.id, json.dumps(workflow_result))
-        
-        logger.info(f"Record {record_id} re-analyzed successfully")
-        
-        return {
-            "status": "success",
-            "message": "Record re-analyzed through the master health workflow",
-            "record_id": record_id,
-            "workflow_status": workflow_result.get("workflow_status"),
-            "risk_level": workflow_result.get("risk_level"),
-            "alert": workflow_result.get("alert"),
-            "report": workflow_result.get("report"),
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error re-analyzing record: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to re-analyze record"
         )

@@ -1,6 +1,8 @@
-import { AnalysisResult, HealthRecordResponse, UnifiedAssessment } from "../../models/health";
+import { AnalysisResult, DiseaseAssessment, HealthRecordResponse, UnifiedAssessment } from "../../models/health";
 import { RiskBadge } from "../shared/RiskBadge";
 import { SectionCard } from "../shared/SectionCard";
+import { StatusBadge, statusLabel } from "../shared/StatusBadge";
+import { AgentStatusPanel } from "../dashboard/AgentStatus";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 interface ResultsOverviewProps {
@@ -13,31 +15,96 @@ function valueOrMissing(value: unknown): string {
   return value === null || value === undefined || value === "" ? "Not available" : String(value);
 }
 
+const DISEASE_LABELS: Record<string, string> = {
+  diabetes: "Diabetes",
+  cardiovascular: "Cardiovascular",
+};
+
+function diseaseLabel(name: string): string {
+  return (
+    DISEASE_LABELS[name] ??
+    name.charAt(0).toUpperCase() + name.slice(1)
+  );
+}
+
+/**
+ * A single condition's assessment.
+ *
+ * The four states are kept apart on purpose: a completed assessment, one
+ * completed with errors, one that failed, and one that was never applicable
+ * mean very different things, and a screen that shows them all as
+ * "not available" hides the difference.
+ */
 function DiseaseCard({ name, assessment }: {
   name: string;
   assessment?: UnifiedAssessment["assessments"]["diabetes"];
 }) {
-  const unavailable = !assessment || assessment.status === "unavailable";
+  const status = assessment?.status ?? "unavailable";
+  const reason = assessment?.reason ?? null;
+
+  const stateNote = (() => {
+    switch (status) {
+      case "completed":
+        return null;
+      case "completed_with_errors":
+        return "The assessment completed, but some of its components could not run, so the score rests on less than the full formula.";
+      case "partial":
+        return "Only part of the assessment could be computed, so the score is a lower bound rather than a complete assessment.";
+      case "failed":
+        return "The assessment for this condition failed. No score was produced.";
+      case "not_applicable":
+        return "No required values were submitted for this condition, so it was not assessed.";
+      case "unavailable":
+      default:
+        return "Not enough data to assess this condition.";
+    }
+  })();
+
+  const hasScore = status === "completed" || status === "completed_with_errors" || status === "partial";
+
   return (
-    <SectionCard title={`${name} risk assessment`}>
-      {unavailable ? (
-        <p className="text-sm text-slate-600">Not enough data to assess this condition.</p>
-      ) : (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-2xl font-semibold text-slate-900">{assessment.risk_level}</p>
-              <p className="text-xs text-slate-500">
-                {assessment.score === null || assessment.score === undefined
+    <SectionCard title={`${diseaseLabel(name)} risk assessment`}>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-2xl font-semibold text-slate-900">
+              {hasScore ? assessment?.risk_level : statusLabel(status)}
+            </p>
+            <p className="text-xs text-slate-500">
+              {hasScore
+                ? assessment?.score === null || assessment?.score === undefined
                   ? "Score not available"
-                  : `Model score: ${assessment.score}`}
-              </p>
-            </div>
-            <RiskBadge level={assessment.risk_level} />
+                  : `Model score: ${assessment?.score}`
+                : "No score was produced"}
+            </p>
           </div>
+          {hasScore ? (
+            <RiskBadge level={assessment?.risk_level ?? "Unknown"} />
+          ) : (
+            <StatusBadge status={status} />
+          )}
+        </div>
+
+        {stateNote && (
+          <p
+            className={`rounded-xl border px-3 py-2 text-xs ${
+              status === "failed"
+                ? "border-red-200 bg-red-50 text-red-800"
+                : status === "completed_with_errors" || status === "partial"
+                  ? "border-amber-200 bg-amber-50 text-amber-900"
+                  : "border-slate-200 bg-slate-50 text-slate-600"
+            }`}
+          >
+            {stateNote}
+          </p>
+        )}
+
+        {reason && <p className="text-xs text-slate-500">{reason}</p>}
+
+        {hasScore && (
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Factors</p>
-            {assessment.factors.length > 0 ? (
+            {assessment?.factors?.length ? (
               <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-700">
                 {assessment.factors.map((factor) => <li key={factor}>{factor}</li>)}
               </ul>
@@ -45,22 +112,39 @@ function DiseaseCard({ name, assessment }: {
               <p className="mt-2 text-sm text-slate-600">No contributing factors were returned.</p>
             )}
           </div>
-        </div>
-      )}
+        )}
+
+        {(assessment?.model_confidence || assessment?.model_variant) && (
+          <p className="text-xs text-slate-500">
+            {assessment?.model_variant && <>Model variant: {assessment.model_variant}. </>}
+            {assessment?.model_confidence && <>Confidence: {assessment.model_confidence}.</>}
+          </p>
+        )}
+      </div>
     </SectionCard>
   );
+}
+
+/** The trend payload, as the results screen reads it. */
+interface TrendView {
+  status?: string;
+  trend_score?: number;
+  direction?: string;
+  visits_used?: number;
+  changes?: Record<string, { direction?: string; delta?: number }>;
 }
 
 export function ResultsOverview({ analysis, record, showSymptomSection = true }: ResultsOverviewProps) {
   const unified = analysis?.unified as unknown as UnifiedAssessment | undefined;
   const legacyRisk = String(analysis?.risk_level ?? "Unavailable");
-  const trend = unified?.trend;
-  const trendChanges = (trend?.changes ?? {}) as Record<string, { direction?: string; delta?: number }>;
+  const trend = unified?.trend as unknown as TrendView | undefined;
+  const trendChanges = trend?.changes ?? {};
   const alert = unified?.alerts?.[0];
   const explanation = typeof unified?.explanation === "string"
     ? unified.explanation
     : String(analysis?.explanation ?? analysis?.report ?? "Explanation is not available.");
   const trendScore = typeof trend?.trend_score === "number" ? trend.trend_score : 0;
+  const assessments: Record<string, DiseaseAssessment> = unified?.assessments ?? {};
 
   return (
     <div className="space-y-6">
@@ -70,8 +154,9 @@ export function ResultsOverview({ analysis, record, showSymptomSection = true }:
 
       {unified ? (
         <div className="grid gap-6 lg:grid-cols-2">
-          <DiseaseCard name="Diabetes" assessment={unified.assessments.diabetes} />
-          <DiseaseCard name="Cardiovascular" assessment={unified.assessments.cardiovascular} />
+          {Object.entries(assessments).map(([name, assessment]) => (
+            <DiseaseCard key={name} name={name} assessment={assessment} />
+          ))}
         </div>
       ) : (
         <SectionCard title="Risk assessment">
@@ -79,6 +164,12 @@ export function ResultsOverview({ analysis, record, showSymptomSection = true }:
             <p className="text-2xl font-semibold text-slate-900">{legacyRisk}</p>
             <RiskBadge level={legacyRisk} />
           </div>
+        </SectionCard>
+      )}
+
+      {unified?.agent_status && Object.keys(unified.agent_status).length > 0 && (
+        <SectionCard title="Agent status">
+          <AgentStatusPanel agentStatus={unified.agent_status} />
         </SectionCard>
       )}
 
@@ -136,7 +227,11 @@ export function ResultsOverview({ analysis, record, showSymptomSection = true }:
               {JSON.stringify(unified.differential.results, null, 2)}
             </pre>
           ) : (
-            <p className="text-sm text-slate-600">No valid differential result was returned.</p>
+            <p className="text-sm text-slate-600">
+              {unified?.differential.status
+                ? `The differential agent did not complete (${statusLabel(unified.differential.status)}).`
+                : "No valid differential result was returned."}
+            </p>
           )}
         </SectionCard>
       </div>
@@ -147,9 +242,15 @@ export function ResultsOverview({ analysis, record, showSymptomSection = true }:
 
       {showSymptomSection && (
         <SectionCard title="Input status">
-          <p className="text-sm text-slate-600">
-            Analysis date: {record?.created_at ? new Date(record.created_at).toLocaleString() : "Not available"}
-            {" · "}Workflow: {String(unified?.status ?? analysis?.workflow_status ?? "Not available")}
+          <p className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+            <span>
+              Analysis date: {record?.created_at ? new Date(record.created_at).toLocaleString() : "Not available"}
+            </span>
+            <span>·</span>
+            <span>
+              Workflow: {String(unified?.status ?? analysis?.workflow_status ?? "Not available")}
+            </span>
+            <StatusBadge status={String(unified?.status ?? analysis?.workflow_status ?? "unknown")} />
           </p>
         </SectionCard>
       )}

@@ -1,26 +1,28 @@
 import { useState } from "react";
-import { HeartPulse, Syringe } from "lucide-react";
+import { FileSearch } from "lucide-react";
 import { SectionCard } from "../shared/SectionCard";
 import { SymptomSelector } from "./SymptomSelector";
 
-interface PdfUploadPanelProps {
-  onSubmit: (
-    file: File,
-    useLLM: boolean,
-    symptoms: string[],
-    manualText: string,
-    disease: "diabetes" | "cardiovascular",
-  ) => void;
-  isLoading?: boolean;
+export interface ReportUploadPayload {
+  file: File;
+  useLLM: boolean;
+  symptoms: string[];
+  manualText: string;
 }
 
-export function PdfUploadPanel({ onSubmit, isLoading }: PdfUploadPanelProps) {
+interface PdfUploadPanelProps {
+  /** Starts the extraction. The assessment only runs after confirmation. */
+  onPreview: (payload: ReportUploadPayload) => void;
+  isLoading?: boolean;
+  error?: string | null;
+}
+
+export function PdfUploadPanel({ onPreview, isLoading, error }: PdfUploadPanelProps) {
   const [file, setFile] = useState<File | null>(null);
   const [useLLM, setUseLLM] = useState(false);
   const [symptoms, setSymptoms] = useState<string[]>([]);
   const [customSymptom, setCustomSymptom] = useState("");
   const [manualText, setManualText] = useState("");
-  const [disease, setDisease] = useState<"diabetes" | "cardiovascular">("diabetes");
 
   const toggleSymptom = (symptom: string) => {
     setSymptoms((prev) =>
@@ -66,41 +68,13 @@ export function PdfUploadPanel({ onSubmit, isLoading }: PdfUploadPanelProps) {
           </div>
         )}
 
-        <div className="space-y-3">
-          <p className="text-sm font-semibold text-slate-900">Assessment focus</p>
-          <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => setDisease("diabetes")}
-              className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${
-                disease === "diabetes"
-                  ? "bg-emerald-600 text-white"
-                  : "border border-slate-200 text-slate-600"
-              }`}
-            >
-              <Syringe size={16} /> Diabetes
-            </button>
-            <button
-              type="button"
-              onClick={() => setDisease("cardiovascular")}
-              className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${
-                disease === "cardiovascular"
-                  ? "bg-emerald-600 text-white"
-                  : "border border-slate-200 text-slate-600"
-              }`}
-            >
-              <HeartPulse size={16} /> Cardiovascular
-            </button>
-          </div>
-          <p className="text-xs text-slate-500">
-            Choose which symptom profile should guide the report analysis.
-          </p>
-        </div>
+        <p className="text-xs text-slate-500">
+          The report is read first, and the values it contains are shown to you
+          for confirmation. The assessment runs only on the values you confirm.
+        </p>
 
-        <div className="space-y-4">
-          <p className="text-sm font-semibold text-slate-900">
-            {disease === "diabetes" ? "Diabetes symptoms" : "Cardiovascular symptoms"}
-          </p>
+        <div className="space-y-3">
+          <p className="text-sm font-semibold text-slate-900">Symptoms</p>
           <SymptomSelector
             selected={symptoms}
             onToggle={toggleSymptom}
@@ -110,33 +84,52 @@ export function PdfUploadPanel({ onSubmit, isLoading }: PdfUploadPanelProps) {
           />
         </div>
 
-         <label className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
-  <input
-    type="checkbox"
-    checked={useLLM}
-    onChange={(event) => setUseLLM(event.target.checked)}
-    className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-  />
+        <label className="block space-y-2 text-sm text-slate-600">
+          Clinical context (optional)
+          <textarea
+            value={manualText}
+            onChange={(event) => setManualText(event.target.value)}
+            maxLength={1000}
+            rows={3}
+            placeholder="Family history, medication, recent complaints…"
+            className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700"
+          />
+        </label>
 
-  <span>
-    <span className="font-semibold text-slate-900">
-      Use LLM enhancement for nuanced summaries
-    </span>
+        <label className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={useLLM}
+            onChange={(event) => setUseLLM(event.target.checked)}
+            className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+          />
+          <span>
+            <span className="font-semibold text-slate-900">
+              Use LLM enhancement for nuanced summaries
+            </span>
+            <br />
+            <span className="text-slate-500">
+              Generates a more detailed alert narrative when the model is available.
+            </span>
+          </span>
+        </label>
 
-    <br />
+        {error && (
+          <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {error}
+          </p>
+        )}
 
-    <span className="text-slate-500">
-      Generates a more detailed alert narrative when the model is available.
-    </span>
-  </span>
-</label>     
         <button
           type="button"
           disabled={!file || isLoading}
-          onClick={() => file && onSubmit(file, useLLM, symptoms, manualText, disease)}
-          className="rounded-full bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-emerald-200"
+          onClick={() =>
+            file && onPreview({ file, useLLM, symptoms, manualText })
+          }
+          className="inline-flex items-center justify-center gap-2 rounded-full bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-emerald-200"
         >
-          {isLoading ? "Analyzing..." : "Analyze report"}
+          <FileSearch size={16} />
+          {isLoading ? "Reading report..." : "Read the report"}
         </button>
       </div>
     </SectionCard>

@@ -50,15 +50,13 @@ The Master Health Agent was implemented with a stateful graph-based workflow so 
 
 ### 2. Frontend Development
 
-The target product direction includes a frontend layer intended to support patient/clinician interaction through a modern web interface. The expected frontend stack is Next.js and Tailwind CSS, and the functional UI scope has been defined in three major modules:
+The product scope covers three modules:
 
 - Health data input form for numeric and structured clinical parameters.
 - Symptom input interface for natural-language symptom capture.
 - Dashboard for showing analysis outcomes, risk level, and report summary.
 
-From a product and architecture standpoint, this frontend scope is aligned with the backend contract and orchestration output. The backend already returns structured response fields such as risk level, alert state, report text, final assessment, and execution metadata, which are suitable for direct rendering on a dashboard.
-
-In this workspace, the active implementation focus is backend and multi-agent pipeline execution. The frontend section is documented as product-ready scope and integration target, and the API contract has been designed to support this UI flow cleanly.
+That scope is now implemented. The frontend under `frontend/` is a React + Vite application wired to the live API: the report panel reads a PDF through `/upload-report/preview`, shows every extracted value for correction, and confirms the corrected values through `/upload-report/confirm`; the manual form is rendered from `/input-schema`, so it always offers exactly the parameters the disease plugins require; and the history page lists the assessments and charts the series from `/history` and `/history/summary`. See [Frontend](#frontend) for the details.
 
 ### 3. Backend Development
 
@@ -173,6 +171,13 @@ Threshold-driven alerting is deterministic and configurable. The agent can also 
 ### 9. Testing and Validation
 
 Testing was performed with pytest using both unit-level and end-to-end coverage patterns across agent modules.
+
+`tests/test_user_journey.py` drives the whole journey the frontend drives —
+upload, preview, correct, confirm, history, summary, re-analyse — against a
+throwaway database, and asserts the shape of every response the UI reads.
+`frontend/src/test/journey.test.tsx` drives the same journey through the React
+components, and `frontend/src/test/states.test.tsx` covers the four
+assessment states and the status vocabulary.
 
 Validation focus areas include:
 
@@ -348,6 +353,15 @@ Current storage model:
 
 The database currently stores structured health records and the analysis JSON produced by the health workflow. The `analysis_result` field may contain either legacy analyzer output or the full master-agent orchestration result.
 
+`HealthRecord` also stores:
+
+- `source` - `manual` or `report`
+- `extracted_parameters` - JSON map of every parameter with its value, clinical status and origin
+- `assessment` - the normalized assessment snapshot (status, risk level, score, disease, components, coverage, agent statuses)
+- `homa_ir` - insulin resistance value
+
+The snapshot means the history endpoints never have to re-parse the full workflow JSON. Legacy records that predate the snapshot are normalized on read by `app/serializers.py`, which reports them as `pending` (no assessment yet) or `unreadable` (analysed but the payload cannot be parsed).
+
 ### Validation Layer
 
 File: `schemas/health_schema.py`
@@ -357,13 +371,64 @@ Current request validation for the main health API includes:
 - HbA1c
 - glucose
 - BMI
+- HOMA-IR
 - age
+- systolic / diastolic blood pressure
+- total cholesterol, LDL, HDL
+- smoker flag (optional — see below)
+- chest pain category and ST segment slope category (optional, ordinal codes 0-3)
 - optional symptoms list
 - optional manual clinical note text
+
+The required and optional fields per condition are not hard-coded here: they are read from the disease plugin registry (`Agents/plugins/registry.py`), so the API contract always matches what the agents actually require. A request is accepted when it fully supports at least one condition; a request that supports none is rejected with the per-condition list of missing parameters.
+
+Validation also covers:
+
+- out-of-range values (every parameter has a `min`/`max` in `PARAMETER_RANGES`)
+- non-numeric or non-boolean values
+- clinically inconsistent combinations (diastolic BP above systolic, LDL above total cholesterol, HDL + LDL far above total cholesterol)
 
 Important note:
 
 The FastAPI `POST /api/v1/health/health-data` endpoint now validates input, stores the health record, triggers the full Master Health Agent workflow, stores the orchestration result, and returns the final risk, alert flag, and patient-facing report.
+
+### Cardiovascular ML Model
+
+Files: `Agents/plugins/cardio_model.py`, `Agents/plugins/cardio_model.pkl`, `Agents/plugins/cardio_model_metadata.json`, `data/Cardiovascular_Disease_Dataset.csv`, `data/README.md`
+
+A logistic regression over the cardiovascular disease dataset (1000 rows). Retrain and re-evaluate it with:
+
+```bash
+python -m Agents.plugins.cardio_model   # refits and rewrites the metadata
+python eval/compare.py                  # writes eval/results/
+```
+
+**Two model variants.** The **base** model's features are exactly the plugin's required fields — `age`, `systolic_bp`, `total_cholesterol` — so a case the plugin accepts can always be scored and a case it rejects can never be scored. The **extended** model adds two optional fields the API also accepts, `chest_pain_type` and `st_slope`. A case is scored by the extended model only when *both* are present; otherwise it is scored by the base model. A partially-supplied case is never handed to a model that expects a feature it does not have, and every prediction reports which variant scored it and which optional features were missing.
+
+**Feature mapping.** The dataset columns map onto the API's field names: `age` → `age`, `restingBP` → `systolic_bp`, `serumcholestrol` → `total_cholesterol`, `chestpain` → `chest_pain_type`, `slope` → `st_slope`. Every other column is either unavailable or not accepted by the API; the full mapping table and the reason for each exclusion are in `data/README.md`.
+
+**The two category codes carry no clinical names.** `chestpain` and `slope` are ordinal codes whose clinical meaning could not be verified for this copy of the dataset — the upstream UCI `slope` variable has three levels where this file has four, and the outcome rates run in the opposite order to the published UCI ones. They are therefore reported as the dataset's own codes ("chest pain category 2"), never under invented names such as "typical angina".
+
+**`smoker` is not in the model.** The dataset has no smoking column. The value is not fabricated and not assumed to be zero, so the model score is independent of smoking status. The rule-based scorer does use it, and treats an absent smoking status as *unknown* rather than as a non-smoker: the smoking component is dropped from the score, its weight is redistributed across the known components, and the result records the assumption. A confirmed non-smoker and an unknown status therefore produce different scores.
+
+**The label is a disease likelihood, not a 10-year risk.** The previous model used Framingham's `TenYearCHD`, a 10-year incident outcome. This dataset's `target` is cross-sectional — the patient is recorded as having cardiovascular disease, with no time horizon. The plugin's summary, its `disclaimer` field and the model's metadata all say so, and the API never labels the output as a 10-year risk.
+
+**Measured performance** (stratified 80/20 split, `random_state=42`):
+
+| | Accuracy | Precision | Recall | F1 | ROC-AUC | Brier |
+|---|---|---|---|---|---|---|
+| ML model, extended features | 0.955 | 0.965 | 0.957 | 0.961 | **0.989** | 0.036 |
+| ML model, base features | 0.770 | 0.792 | 0.819 | 0.805 | **0.825** | 0.166 |
+| Rule scorer | 0.640 | 0.629 | 0.922 | 0.748 | 0.763 | 0.203 |
+| Always-positive baseline | 0.580 | 0.580 | 1.000 | 0.734 | 0.500 | 0.244 |
+
+5-fold cross-validated ROC-AUC: **0.984** for the extended model, **0.800** for the base model.
+
+**What these numbers do and do not mean.** The dataset's labels are rule-derived rather than observed clinical outcomes — an unpruned decision tree on five of its columns reaches 96.7% training accuracy, and 204 of the 230 groups they form are perfectly pure. Held-out performance therefore measures how well the model recovers the generating rule; it does **not** establish clinical validity. The model's confidence is capped at `moderate` for that reason, and the reasoning travels with the prediction in `model_confidence`, `model_target` and `model_limitations`.
+
+The remaining gap is the feature set: the columns the model still cannot use (resting ECG, maximum heart rate, exercise angina, ST depression, vessels coloured) carry the rest of the label's signal. Measured on the same split, using all twelve dataset columns reaches ROC-AUC 0.998. Closing that gap means adding those fields to the API contract, the database and the frontend — a deliberate decision, not an oversight.
+
+The extended model's much higher score is itself a warning: `chestpain` and `slope` separate the label almost perfectly, which is further evidence that the outcome was generated from them rather than observed. A model that recovers a generating rule this precisely has not been tested against reality.
 
 ## Current API Surface
 
@@ -381,6 +446,32 @@ The FastAPI `POST /api/v1/health/health-data` endpoint now validates input, stor
 - `GET /api/v1/health/health-data`
 - `GET /api/v1/health/latest`
 - `POST /api/v1/health/analyze/{record_id}`
+- `GET /api/v1/health/input-schema`
+- `POST /api/v1/health/upload-report`
+- `POST /api/v1/health/upload-report/preview`
+- `POST /api/v1/health/upload-report/confirm`
+- `GET /api/v1/health/history`
+- `GET /api/v1/health/history/summary`
+- `DELETE /api/v1/health/health-data/{record_id}`
+
+`GET /input-schema` describes every accepted parameter (min, max, unit, type) and the conditions they belong to, so the frontend can build its form from the server contract instead of hard-coding field lists.
+
+`POST /upload-report/preview` stores the report as a pending record and returns the extracted values without running an assessment. `POST /upload-report/confirm` takes the (optionally corrected) values, validates them exactly like a manual submission, runs the workflow and stores the assessment. The original extraction is kept for audit.
+
+`GET /history` returns paginated assessment history (newest first) with the normalized snapshot for each record, plus the missing parameters per condition. `GET /history/summary` returns parameter and score time series and a risk-level tally.
+
+### Error Format
+
+All errors use one envelope:
+
+```json
+{
+  "status": "error",
+  "error": "ValidationError",
+  "message": "Request validation failed",
+  "details": [{ "field": "hba1c", "message": "Input should be less than or equal to 20", "code": "less_than_equal" }]
+}
+```
 
 ### Root / Utility Endpoints
 
@@ -389,19 +480,70 @@ The FastAPI `POST /api/v1/health/health-data` endpoint now validates input, stor
 
 ## Frontend
 
-The project also includes a React + Vite frontend under `frontend/`.
+The project includes a React + Vite frontend under `frontend/`.
 
 Current frontend stack:
 
-- React 19
+- React 18 + TypeScript
 - Vite
 - React Router
+- TanStack Query
 - React Hook Form
 - Axios
-- Zustand
+- Tailwind CSS
 - Recharts
+- Vitest + React Testing Library
 
-This frontend currently provides the client-side foundation for user interaction and authentication-related flows.
+### The report flow
+
+A report is read before it is assessed, so a value the parser got wrong never
+reaches the agents:
+
+1. `POST /api/v1/health/upload-report/preview` stores the PDF, extracts the
+   values and creates a **pending** record. No assessment runs.
+2. The review screen shows each extracted value with its clinical status,
+   unit and note, and lets the user correct it. Values the report did not
+   contain are offered too, along with the conditions that are still missing
+   a required parameter and the conditions that can already be assessed.
+3. `POST /api/v1/health/upload-report/confirm` validates the confirmed values
+   exactly like a manual submission, runs the master workflow and stores the
+   result on the same record.
+
+The one-shot `POST /api/v1/health/upload-report` endpoint still exists for
+API clients that do not need the correction step.
+
+### The manual form
+
+The manual entry form is rendered from `GET /api/v1/health/input-schema`,
+which is itself generated from the disease plugins. A parameter therefore
+appears in the form as soon as the API accepts it, with the bounds the API
+enforces, without a frontend change. The smoking status is a three-state
+choice: leaving it unset sends no value at all, which the scorer reports as
+*unknown* rather than as a confirmed non-smoker.
+
+### The results screen
+
+Every condition is shown with the state it is actually in. The four states
+are kept apart, because they mean different things:
+
+| State | What the screen shows |
+|---|---|
+| `completed` | The score, the contributing factors, and the model's confidence |
+| `completed_with_errors` | The score, and a note that it rests on less than the full formula |
+| `failed` | That the assessment failed, and the reason — no score is shown |
+| `unavailable` | That there was not enough data to assess the condition |
+| `not_applicable` | That no required values were submitted for the condition |
+
+The agents that ran are listed with their own status, so a degraded
+assessment is visible rather than implied.
+
+### The history
+
+`GET /api/v1/health/history` lists the assessments, each with its state and
+the level of every condition it covered. `GET /api/v1/health/history/summary`
+returns the per-parameter and per-score time series the charts are drawn
+from. Re-analysing a record replaces its result rather than adding a second
+record, and refreshes both.
 
 ## Standalone Conversational Health Agent
 
@@ -503,6 +645,17 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 cd frontend
 npm install
 npm run dev
+```
+
+### 7. Run the tests
+
+```powershell
+# Backend
+python -m pytest
+
+# Frontend
+cd frontend
+npm test
 ```
 
 ## Optional Local LLM Setup

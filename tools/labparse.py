@@ -77,8 +77,49 @@ class LabReportParser:
                 r"Age\s*:?\s*(\d+)\s*[Yy]ears?",
                 r"Age\s*:?\s*(\d+)\s*[Yy]rs?",
                 r"Age\s*:?\s*(\d+)"
-            ]
+            ],
+            # ── Cardiovascular parameters ──────────────────────────────────
+            "systolic_bp": [
+                r"(?:Systolic\s*BP|BP\s*\(?\s*Systolic\s*\)?)\s*:?\s*(\d{2,3})",
+                r"Systolic\s*(?:Blood\s*Pressure)?\s*:?\s*(\d{2,3})\s*mm",
+            ],
+            "diastolic_bp": [
+                r"(?:Diastolic\s*BP|BP\s*\(?\s*Diastolic\s*\)?)\s*:?\s*(\d{2,3})",
+                r"Diastolic\s*(?:Blood\s*Pressure)?\s*:?\s*(\d{2,3})\s*mm",
+            ],
+            "total_cholesterol": [
+                r"Total\s+Cholesterol\s*:?\s*(\d{1,3}(?:\.\d+)?)",
+                r"Cholesterol\s*\(?Total\)?\s*:?\s*(\d{1,3}(?:\.\d+)?)",
+                r"Serum\s+Cholesterol\s*:?\s*(\d{1,3}(?:\.\d+)?)",
+                r"(?:^|\s)TC\s*:?\s*(\d{1,3}(?:\.\d+)?)",
+            ],
+            "ldl": [
+                r"LDL\s*(?:Cholesterol)?\s*[-:]?\s*(\d{1,3}(?:\.\d+)?)",
+                r"LDL-C\s*:?\s*(\d{1,3}(?:\.\d+)?)",
+            ],
+            "hdl": [
+                r"HDL\s*(?:Cholesterol)?\s*[-:]?\s*(\d{1,3}(?:\.\d+)?)",
+                r"HDL-C\s*:?\s*(\d{1,3}(?:\.\d+)?)",
+            ],
         }
+
+        # Patterns whose value carries two numbers, e.g. "Blood Pressure 120/80".
+        self.combined_patterns = {
+            "blood_pressure": [
+                r"(?:Blood\s*Pressure|BP)\s*:?\s*(\d{2,3})\s*/\s*(\d{2,3})",
+            ],
+        }
+
+        # Boolean parameters reported as words rather than numbers.
+        self.boolean_patterns = {
+            "smoker": [
+                r"(?:Smoker|Smoking\s+Status|History\s+of\s+Smoking)\s*:?\s*(Yes|No|True|False|Y|N)\b",
+            ],
+        }
+
+        #: Every parameter this parser can produce. The combined patterns
+        #: ("120/80") are a source, not a parameter, so they are excluded.
+        self.parameters = list(self.patterns) + list(self.boolean_patterns)
         
         logger.info(f"LabReportParser initialized (LLM: {use_llm})")
     
@@ -129,15 +170,15 @@ class LabReportParser:
     def extract_with_regex(self, text: str) -> Dict[str, Optional[float]]:
         """
         Extract health parameters using regex patterns
-        
+
         Args:
             text: Text content from PDF
-            
+
         Returns:
             Dictionary of extracted parameters
         """
         results = {}
-        
+
         for param_name, patterns in self.patterns.items():
             value = None
             for pattern in patterns:
@@ -149,7 +190,35 @@ class LabReportParser:
                     except (ValueError, IndexError):
                         continue
             results[param_name] = value
-        
+
+        # "Blood Pressure 120/80" carries both pressures in one match.
+        for pattern in self.combined_patterns["blood_pressure"]:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    systolic, diastolic = float(match.group(1)), float(match.group(2))
+                except (ValueError, IndexError):
+                    continue
+                if results.get("systolic_bp") is None:
+                    results["systolic_bp"] = systolic
+                if results.get("diastolic_bp") is None:
+                    results["diastolic_bp"] = diastolic
+                break
+
+        for param_name, patterns in self.boolean_patterns.items():
+            value = None
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    token = (match.group(1) or "").strip().lower()
+                    if token in {"yes", "true", "y"}:
+                        value = True
+                    elif token in {"no", "false", "n"}:
+                        value = False
+                    if value is not None:
+                        break
+            results[param_name] = value
+
         logger.info(f"Regex extraction found: {sum(1 for v in results.values() if v is not None)} parameters")
         return results
     
@@ -167,14 +236,21 @@ class LabReportParser:
             raise RuntimeError("LLM not initialized")
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a medical data extraction specialist. 
+            ("system", """You are a medical data extraction specialist.
 Extract the following health parameters from lab reports:
 - HbA1c (%) - Glycated Hemoglobin
 - Glucose (mg/dL) - Blood Glucose level
 - BMI - Body Mass Index
 - Age (years)
+- Systolic BP (mmHg) - systolic blood pressure
+- Diastolic BP (mmHg) - diastolic blood pressure
+- Total Cholesterol (mg/dL)
+- LDL Cholesterol (mg/dL)
+- HDL Cholesterol (mg/dL)
+- Smoker (boolean) - true when the report states the patient smokes
 
-Return ONLY a valid JSON object with these exact keys: hba1c, glucose, bmi, age
+Return ONLY a valid JSON object with these exact keys:
+hba1c, glucose, bmi, age, systolic_bp, diastolic_bp, total_cholesterol, ldl, hdl, smoker
 If a parameter is not found, use null as the value.
 Do not include any explanation, only the JSON object.
 
@@ -183,34 +259,69 @@ Example output:
   "hba1c": 6.5,
   "glucose": 120.0,
   "bmi": 25.3,
-  "age": 45
+  "age": 45,
+  "systolic_bp": 128,
+  "diastolic_bp": 82,
+  "total_cholesterol": 195,
+  "ldl": 110,
+  "hdl": 48,
+  "smoker": false
 }"""),
             ("user", "Extract health parameters from this lab report:\n\n{text}")
         ])
-        
+
         try:
             chain = prompt | self.llm
             response = chain.invoke({"text": text[:4000]})  # Limit text length
-            
+
             # Parse JSON from response
             content = response.strip() if isinstance(response, str) else response.content.strip()
-            
+
             # Remove markdown code blocks if present
             if content.startswith("```"):
                 content = re.sub(r"```json\s*", "", content)
                 content = re.sub(r"```\s*$", "", content)
-            
+
             data = json.loads(content)
-            
+            data = self._normalize_values(data)
+
             logger.info(f"LLM extraction found: {sum(1 for v in data.values() if v is not None)} parameters")
             return data
-        
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response as JSON: {e}")
-            return {"hba1c": None, "glucose": None, "bmi": None, "age": None}
+            return {key: None for key in self.parameters}
         except Exception as e:
             logger.error(f"LLM extraction error: {e}")
-            return {"hba1c": None, "glucose": None, "bmi": None, "age": None}
+            return {key: None for key in self.parameters}
+
+    def _normalize_values(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Coerce extracted values to the types the agents expect.
+
+        Unknown keys are dropped, missing keys are added as ``None`` and
+        numeric fields are converted to floats.
+        """
+        normalized: Dict[str, Any] = {key: None for key in self.parameters}
+        boolean_fields = set(self.boolean_patterns)
+
+        for key, value in (data or {}).items():
+            if key not in normalized or value is None:
+                continue
+            if key in boolean_fields:
+                if isinstance(value, bool):
+                    normalized[key] = value
+                else:
+                    token = str(value).strip().lower()
+                    if token in {"yes", "true", "y", "1"}:
+                        normalized[key] = True
+                    elif token in {"no", "false", "n", "0"}:
+                        normalized[key] = False
+                continue
+            try:
+                normalized[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return normalized
     
     def parse_pdf(self, pdf_path: str) -> Dict[str, Any]:
         """
@@ -231,14 +342,14 @@ Example output:
             
             # Try regex extraction first
             regex_results = self.extract_with_regex(text)
-            
+
             # If LLM is enabled, use it as well
             if self.use_llm:
                 llm_results = self.extract_with_llm(text)
-                
+
                 # Merge results (prefer regex if both found, otherwise use LLM)
                 final_results = {}
-                for key in ["hba1c", "glucose", "bmi", "age"]:
+                for key in self.parameters:
                     if regex_results.get(key) is not None:
                         final_results[key] = regex_results[key]
                     elif llm_results.get(key) is not None:
@@ -247,16 +358,19 @@ Example output:
                         final_results[key] = None
             else:
                 final_results = regex_results
-            
+
             # Count successful extractions
             extracted_count = sum(1 for v in final_results.values() if v is not None)
-            
+
             result = {
                 "success": True,
                 "file": Path(pdf_path).name,
                 "parameters": final_results,
                 "extracted_count": extracted_count,
-                "message": f"Successfully extracted {extracted_count}/4 parameters"
+                "message": (
+                    f"Successfully extracted {extracted_count}/"
+                    f"{len(self.parameters)} parameters"
+                )
             }
             
             logger.info(f"PDF parsing complete: {result['message']}")

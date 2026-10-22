@@ -85,6 +85,16 @@ def validate_parameters(data: dict, plugin=None) -> dict:
         if v is None:
             continue
 
+        if isinstance(v, bool):
+            # Categorical parameters (e.g. smoker) are reported, not ranged.
+            results[k] = {
+                "value": v,
+                "status": "Reported",
+                "unit": "",
+                "note": plugin.notes(k, "Reported"),
+            }
+            continue
+
         try:
             val_num = float(v)
         except (ValueError, TypeError):
@@ -98,6 +108,17 @@ def validate_parameters(data: dict, plugin=None) -> dict:
                 "status": "Unknown",
                 "unit": "",
                 "note": "No reference range available",
+            }
+            continue
+
+        if r.get("categorical"):
+            # An ordinal category code is not a measurement: reporting it as
+            # Normal/High against a numeric range would be meaningless.
+            results[k] = {
+                "value": val_num,
+                "status": "Reported",
+                "unit": r.get("unit", ""),
+                "note": plugin.notes(k, "Reported"),
             }
             continue
 
@@ -125,6 +146,9 @@ def validate_parameters(data: dict, plugin=None) -> dict:
         "parameters": results,
         "abnormal_count": abnormal,
         "abnormal_parameters": abnormal_params,
+        # "flags" is the disease-neutral key; "endocrine_flags" is kept as an
+        # alias for existing diabetes consumers.
+        "flags": flags,
         "endocrine_flags": flags,
     }
 

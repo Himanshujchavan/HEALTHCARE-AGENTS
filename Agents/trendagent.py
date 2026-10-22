@@ -32,16 +32,24 @@ def _extract_param_value(h: Dict, param: str) -> Optional[float]:
 class TrendAgent:
     """Analyzes health trends over time for a specific disease."""
 
+    #: A trend needs at least this many prior records to be meaningful.
+    MIN_HISTORY_RECORDS = 2
+
     @staticmethod
     def run_trend(history: List[Dict], plugin: DiseasePlugin, current: Dict) -> Dict[str, Any]:
         # Window includes the historical records plus the current record
-        if not history or len(history) < 1:
+        if not history or len(history) < TrendAgent.MIN_HISTORY_RECORDS:
             return {
                 "trend_score": 0.0,
                 "direction": "stable",
                 "rising_but_normal": [],
-                "visits_used": 1 if current else 0,
-                "status": "insufficient_history"
+                "visits_used": (len(history) + 1) if current else len(history),
+                "history_records": len(history or []),
+                "status": "insufficient_history",
+                "reason": (
+                    f"Trend requires at least {TrendAgent.MIN_HISTORY_RECORDS} prior "
+                    f"records; {len(history or [])} available."
+                ),
             }
 
         max_delta_score = 0.0
@@ -101,6 +109,11 @@ class TrendAgent:
                  if _extract_param_value(h, param) is not None),
                 None,
             )
+            oldest_value = next(
+                (_extract_param_value(h, param) for h in history
+                 if _extract_param_value(h, param) is not None),
+                None,
+            )
             if current_value is None or previous_value is None:
                 continue
             delta = round(current_value - previous_value, 4)
@@ -109,6 +122,13 @@ class TrendAgent:
                 "current": current_value,
                 "delta": delta,
                 "direction": "increased" if delta > 0 else "decreased" if delta < 0 else "stable",
+                # The window delta is the one the trend score is built on
+                # (current minus the oldest record in the window).
+                "oldest": oldest_value,
+                "window_delta": (
+                    round(current_value - oldest_value, 4)
+                    if oldest_value is not None else None
+                ),
             }
 
         return {
@@ -116,6 +136,7 @@ class TrendAgent:
             "direction": overall_direction,
             "rising_but_normal": rising_but_normal,
             "visits_used": total_visits,
-            "status": "completed"
-            ,"changes": changes
+            "history_records": len(history),
+            "status": "completed",
+            "changes": changes,
         }
